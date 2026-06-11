@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 use PHPOpenSourceSaver\JWTAuth\Facades\JWTAuth;
 
 class AuthController extends Controller
@@ -14,76 +13,75 @@ class AuthController extends Controller
     {
         $data = $request->validate([
             'first_name' => 'required|string|max:255',
-            'last_name' => 'nullable|string|max:255',
-            'email' => 'nullable|email|unique:users,email',
-            'phone' => 'nullable|string|unique:users,phone',
-            'password' => 'required|string|min:6|confirmed',
+            'last_name'  => 'nullable|string|max:255',
+            'email'      => 'nullable|email|unique:users,email|required_without:phone',
+            'phone'      => 'nullable|string|unique:users,phone|required_without:email',
+            'password'   => 'required|string|min:6|confirmed',
         ]);
 
         $user = User::create([
             'first_name' => $data['first_name'],
-            'last_name' => $data['last_name'] ?? null,
-            'email' => $data['email'] ?? null,
-            'phone' => $data['phone'] ?? null,
-            'password' => Hash::make($data['password']),
-            'role' => 'user',
-            'status' => 'active',
+            'last_name'  => $data['last_name'] ?? null,
+            'email'      => $data['email'] ?? null,
+            'phone'      => $data['phone'] ?? null,
+            'password'   => $data['password'],
+            'role'       => 'user',
+            'status'     => 'active',
         ]);
 
         $token = JWTAuth::fromUser($user);
 
-        return $this->respondWithToken(
-            $token,
-            $user,
-            'Register successful',
-            201
-        );
+        return $this->respondWithToken($token, $user, 'Register successful', 201);
     }
 
     public function login(Request $request)
     {
         $request->validate([
-            'login' => 'required',
-            'password' => 'required',
+            'login'    => 'required|string',
+            'password' => 'required|string',
         ]);
-
-        $field = filter_var(
-            $request->login,
-            FILTER_VALIDATE_EMAIL
-        ) ? 'email' : 'phone';
-
+    
+        $field = filter_var($request->login, FILTER_VALIDATE_EMAIL)
+            ? 'email'
+            : 'phone';
+    
         $credentials = [
             $field => $request->login,
             'password' => $request->password,
         ];
-
-        if (!$token = auth('api')->attempt($credentials)) {
+    
+        try {
+            if (!$token = auth('api')->attempt($credentials)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid credentials',
+                ], 401);
+            }
+    
+            $user = auth('api')->user();
+    
+            if (!$user || $user->status !== 'active') {
+                auth('api')->logout();
+    
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Account is not active',
+                ], 403);
+            }
+    
+            $user->update([
+                'last_login_at' => now(),
+            ]);
+    
+            return $this->respondWithToken($token, $user, 'Login successful');
+    
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Invalid credentials',
-            ], 401);
+                'message' => 'Login server error',
+                'error' => $e->getMessage(),
+            ], 500);
         }
-
-        $user = auth('api')->user();
-
-        if ($user->status !== 'active') {
-            auth('api')->logout();
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Account is not active',
-            ], 403);
-        }
-
-        $user->update([
-            'last_login_at' => now(),
-        ]);
-
-        return $this->respondWithToken(
-            $token,
-            $user,
-            'Login successful'
-        );
     }
 
     public function me()
@@ -114,12 +112,8 @@ class AuthController extends Controller
         ]);
     }
 
-    private function respondWithToken(
-        string $token,
-        User $user,
-        string $message = 'Success',
-        int $status = 200
-    ) {
+    private function respondWithToken($token, User $user, $message = 'Success', $status = 200)
+    {
         return response()->json([
             'success' => true,
             'message' => $message,

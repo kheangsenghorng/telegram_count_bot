@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Str;
 use PHPOpenSourceSaver\JWTAuth\Contracts\JWTSubject;
 
 class User extends Authenticatable implements JWTSubject
@@ -12,24 +13,24 @@ class User extends Authenticatable implements JWTSubject
     use Notifiable, SoftDeletes;
 
     protected $fillable = [
+        'uuid',
         'first_name',
         'last_name',
         'email',
         'phone',
         'password',
-
         'telegram_id',
         'telegram_username',
         'telegram_first_name',
         'telegram_last_name',
         'telegram_photo_url',
-
         'role',
         'status',
         'last_login_at',
     ];
 
     protected $hidden = [
+        'id',
         'password',
         'remember_token',
     ];
@@ -40,9 +41,17 @@ class User extends Authenticatable implements JWTSubject
         'password' => 'hashed',
     ];
 
-    /**
-     * JWT
-     */
+    protected static function boot()
+    {
+        parent::boot();
+
+        static::creating(function ($user) {
+            if (empty($user->uuid)) {
+                $user->uuid = (string) Str::uuid();
+            }
+        });
+    }
+
     public function getJWTIdentifier()
     {
         return $this->getKey();
@@ -53,12 +62,15 @@ class User extends Authenticatable implements JWTSubject
         return [];
     }
 
-    /**
-     * Relationships
-     */
     public function subscriptions()
     {
         return $this->hasMany(UserSubscription::class);
+    }
+
+    public function activeSubscription()
+    {
+        return $this->hasOne(UserSubscription::class)
+            ->where('status', 'active');
     }
 
     public function telegramGroups()
@@ -84,11 +96,5 @@ class User extends Authenticatable implements JWTSubject
     public function usageLogs()
     {
         return $this->hasMany(SubscriptionUsageLog::class);
-    }
-
-    public function activeSubscription()
-    {
-        return $this->hasOne(UserSubscription::class)
-            ->where('status', 'active');
     }
 }
