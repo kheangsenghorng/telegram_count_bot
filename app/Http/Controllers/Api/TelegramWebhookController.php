@@ -368,4 +368,13 @@ class TelegramWebhookController extends Controller
 
         return Http::post($url, $data)->json();
     }
+    public function testMessage()
+{
+    $chatId = '-1004248571145';
+
+    return $this->telegramApi('sendMessage', [
+        'chat_id' => $chatId,
+        'text' => '✅ Telegram Bot Test Success from Laravel'
+    ]);
+}
 }

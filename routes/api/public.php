@@ -7,7 +7,11 @@ use App\Http\Controllers\Api\TelegramWebhookController;
 Route::prefix('telegram')->group(function () {
 
     Route::post('/webhook', [TelegramWebhookController::class, 'webhook']);
-    
+
+    Route::get('/test', [TelegramWebhookController::class, 'testMessage']);
+    Route::get('/set-webhook', [TelegramWebhookController::class, 'setWebhook']);
+    Route::get('/webhook-info', [TelegramWebhookController::class, 'webhookInfo']);
+        
     if (app()->environment('local')) {
         Route::get('/test-connect', [TelegramWebhookController::class, 'testConnect']);
     }
