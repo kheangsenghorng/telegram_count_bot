@@ -16,215 +16,295 @@ use Illuminate\Support\Str;
 
 class TelegramWebhookController extends Controller
 {
+    // public function webhook(Request $request)
+    // {
+    //     $message = $request->input('message');
+
+    //     if (!$message) {
+    //         return response()->json(['ok' => true]);
+    //     }
+
+    //     $chat = $message['chat'] ?? [];
+    //     $from = $message['from'] ?? [];
+    //     $text = trim($message['text'] ?? '');
+    //     $chatId = (string) ($chat['id'] ?? '');
+
+    //     if (!$text) {
+    //         return response()->json(['ok' => true]);
+    //     }
+
+    //     // ABA payment message
+    //    // Normalize text for trigger detection (don't modify $text itself)
+    // $normalizedText = preg_replace('/^@\S+\s+/u', '', $text);
+    // $normalizedText = preg_replace('/^\[.*?\]:\s*/us', '', $normalizedText);
+
+    // if (
+    //     str_contains($normalizedText, 'paid by') &&
+    //     str_contains($normalizedText, 'Trx. ID') &&
+    //     str_contains($normalizedText, 'APV:')
+    // ) {
+    //     return $this->storeAbaPayment($request, $text); // pass original $text
+    // }
+
+
+    //     if (str_starts_with($text, '/start')) {
+    //         return $this->startAccount($chat, $from);
+    //     }
+
+    //     if (str_starts_with($text, '/connect')) {
+    //         return $this->connectGroup($chat, $from, $text);
+    //     }
+
+    //     if ($text === '🆕 New Token') {
+    //         return $this->reply($chatId, '🆕 New Token selected');
+    //     }
+
+    //     if ($text === '🔑 My Tokens') {
+    //         return $this->reply($chatId, '🔑 My Tokens selected');
+    //     }
+
+    //     if ($text === '🌐 Domains') {
+    //         return $this->reply($chatId, '🌐 Domains selected');
+    //     }
+
+    //     if ($text === '💬 Support') {
+    //         return $this->reply($chatId, '💬 Support selected');
+    //     }
+
+    //     if ($text === '🔒 Privacy Policy') {
+    //         return $this->reply($chatId, 'https://yourdomain.com/privacy');
+    //     }
+
+    //     if ($text === '📜 Terms of Service') {
+    //         return $this->reply($chatId, 'https://yourdomain.com/terms');
+    //     }
+
+    //     return response()->json(['ok' => true]);
+    // }
     public function webhook(Request $request)
-    {
-        $message = $request->input('message');
+{
+    $message = $request->input('message');
 
-        if (!$message) {
-            return response()->json(['ok' => true]);
-        }
-
-        $chat = $message['chat'] ?? [];
-        $from = $message['from'] ?? [];
-        $text = trim($message['text'] ?? '');
-        $chatId = (string) ($chat['id'] ?? '');
-
-        if (!$text) {
-            return response()->json(['ok' => true]);
-        }
-
-        // ABA payment message
-        if (
-            str_contains($text, 'paid by') &&
-            str_contains($text, 'Trx. ID') &&
-            str_contains($text, 'APV:')
-        ) {
-            return $this->storeAbaPayment($request, $text);
-        }
-        
-
-        if (str_starts_with($text, '/start')) {
-            return $this->startAccount($chat, $from);
-        }
-
-        if (str_starts_with($text, '/connect')) {
-            return $this->connectGroup($chat, $from, $text);
-        }
-
-        if ($text === '🆕 New Token') {
-            return $this->reply($chatId, '🆕 New Token selected');
-        }
-
-        if ($text === '🔑 My Tokens') {
-            return $this->reply($chatId, '🔑 My Tokens selected');
-        }
-
-        if ($text === '🌐 Domains') {
-            return $this->reply($chatId, '🌐 Domains selected');
-        }
-
-        if ($text === '💬 Support') {
-            return $this->reply($chatId, '💬 Support selected');
-        }
-
-        if ($text === '🔒 Privacy Policy') {
-            return $this->reply($chatId, 'https://yourdomain.com/privacy');
-        }
-
-        if ($text === '📜 Terms of Service') {
-            return $this->reply($chatId, 'https://yourdomain.com/terms');
-        }
-
+    if (!$message) {
         return response()->json(['ok' => true]);
     }
-    private function storeAbaPayment(Request $request, string $text)
-    {
-        try {
-            $telegramChatId = (string) $request->input('message.chat.id');
-    
-            $group = TelegramGroup::where('group_id', $telegramChatId)
-                ->where('status', 'connected')
-                ->latest()
-                ->first();
-    
-            $userId          = $group?->user_id;
-            $subscriptionId  = $group?->subscription_id;
-            $telegramGroupId = $group?->telegramGroupsID;
-    
-            if (!$group) {
-                $this->sendMessage(
-                    $telegramChatId,
-                    "⚠️ Payment received but group is not connected.\n\n"
-                    . "Telegram Chat ID: {$telegramChatId}\n\n"
-                    . "Please connect this group first:\n"
-                    . "/connect YOUR_SUBSCRIPTION_KEY"
-                );
-            }
-    
-            // ----------------------------------------------------------------
-            // Regex — handles both formats:
-            //   $100 paid by ...   (USD, full amount)
-            //   ៛100 paid by ...   (KHR)
-            //   ...100 paid by ... (truncated — treat as USD)
-            //   Date: "Jun 12, 04:44 PM"
-            // ----------------------------------------------------------------
-            preg_match(
-                '/(?P<currency_sym>[៛$]|\.{3})?(?P<amount>[\d,]+(?:\.\d+)?)\s+paid by\s+(?P<payer_name>.+?)\s+\((?P<payer_account>[^)]+)\)\s+on\s+(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{1,2}:\d{2}\s*(?:AM|PM))\s+via\s+(?P<method>.+?)\s+at\s+(?P<merchant>.+?)\.\s+Trx\.\s*ID:\s*(?P<trx_id>\d+),\s*APV:\s*(?P<apv>\d+)/ui',
-                $text,
-                $match
+
+    $chat   = $message['chat'] ?? [];
+    $from   = $message['from'] ?? [];
+    $text   = trim($message['text'] ?? '');
+    $chatId = (string) ($chat['id'] ?? '');
+
+    if (!$text) {
+        return response()->json(['ok' => true]);
+    }
+
+    // ----------------------------------------------------------------
+    // ABA payment from @PayWayByABA_bot — check this FIRST,
+    // before any is_bot filtering, so bot messages are not skipped
+    // ----------------------------------------------------------------
+    if (
+        str_contains($text, 'paid by') &&
+        str_contains($text, 'Trx. ID') &&
+        str_contains($text, 'APV:')
+    ) {
+        return $this->storeAbaPayment($request, $text);
+    }
+
+    // Skip all other bot messages — only process real user commands below
+    if (!empty($from['is_bot'])) {
+        return response()->json(['ok' => true]);
+    }
+
+    if (str_starts_with($text, '/start')) {
+        return $this->startAccount($chat, $from);
+    }
+
+    if (str_starts_with($text, '/connect')) {
+        return $this->connectGroup($chat, $from, $text);
+    }
+
+    if ($text === '🆕 New Token') {
+        return $this->reply($chatId, '🆕 New Token selected');
+    }
+
+    if ($text === '🔑 My Tokens') {
+        return $this->reply($chatId, '🔑 My Tokens selected');
+    }
+
+    if ($text === '🌐 Domains') {
+        return $this->reply($chatId, '🌐 Domains selected');
+    }
+
+    if ($text === '💬 Support') {
+        return $this->reply($chatId, '💬 Support selected');
+    }
+
+    if ($text === '🔒 Privacy Policy') {
+        return $this->reply($chatId, 'https://yourdomain.com/privacy');
+    }
+
+    if ($text === '📜 Terms of Service') {
+        return $this->reply($chatId, 'https://yourdomain.com/terms');
+    }
+
+    return response()->json(['ok' => true]);
+}
+private function storeAbaPayment(Request $request, string $text)
+{
+    try {
+        $telegramChatId = (string) $request->input('message.chat.id');
+
+        $group = TelegramGroup::where('group_id', $telegramChatId)
+            ->where('status', 'connected')
+            ->latest()
+            ->first();
+
+        $userId          = $group?->user_id;
+        $subscriptionId  = $group?->subscription_id;
+        $telegramGroupId = $group?->telegramGroupsID;
+
+        if (!$group) {
+            $this->sendMessage(
+                $telegramChatId,
+                "⚠️ Payment received but group is not connected.\n\n"
+                . "Telegram Chat ID: {$telegramChatId}\n\n"
+                . "Please connect this group first:\n"
+                . "/connect YOUR_SUBSCRIPTION_KEY"
             );
-    
-            if (!isset($match['trx_id'])) {
-                $payment = TelegramPayment::create([
-                    'user_id'            => $userId,
-                    'subscription_id'    => $subscriptionId,
-                    'telegram_group_id'  => $telegramGroupId,
-                    'raw_message'        => $text,
-                    'status'             => 'pending',
-                    'parsed_successfully'=> false,
-                    'is_duplicate'       => false,
-                ]);
-    
-                return response()->json([
-                    'ok'             => true,
-                    'message'        => 'Text saved but not parsed',
-                    'telegram_chat_id' => $telegramChatId,
-                    'found_group'    => (bool) $group,
-                    'data'           => $payment,
-                ]);
-            }
-    
-            // ----------------------------------------------------------------
-            // Currency — '...' prefix means Telegram truncated the $ symbol
-            // ----------------------------------------------------------------
-            $currencySym = $match['currency_sym'] ?? '';
-            if ($currencySym === '៛') {
-                $currency = 'KHR';
-            } else {
-                // '$' or '...' (truncated USD) or blank
-                $currency = 'USD';
-            }
-    
-            // ----------------------------------------------------------------
-            // Date — "Jun 12, 04:44 PM"
-            // ----------------------------------------------------------------
-            try {
-                $paymentDate = Carbon::createFromFormat(
-                    'M d, h:i A',
-                    trim($match['date'])
-                )->year(now()->year);
-            } catch (\Throwable $e) {
-                try {
-                    // Fallback: strip extra spaces and retry
-                    $cleanDate = preg_replace('/\s+/', ' ', trim($match['date']));
-                    $paymentDate = Carbon::parse($cleanDate);
-                } catch (\Throwable $e2) {
-                    $paymentDate = now();
-                }
-            }
-    
-            // ----------------------------------------------------------------
-            // Duplicate check
-            // ----------------------------------------------------------------
-            $trxId          = trim($match['trx_id']);
-            $existingPayment = TelegramPayment::where('trx_id', $trxId)->first();
-    
-            $payment = TelegramPayment::updateOrCreate(
-                ['trx_id' => $trxId],
-                [
-                    'user_id'            => $userId,
-                    'subscription_id'    => $subscriptionId,
-                    'telegram_group_id'  => $telegramGroupId,
-    
-                    'currency'           => $currency,
-                    'amount'             => (float) str_replace(',', '', $match['amount']),
-                    'payer_name'         => trim($match['payer_name']),
-                    'payer_account'      => trim($match['payer_account']),
-                    'merchant_name'      => trim($match['merchant']),
-                    'payment_method'     => trim($match['method']),
-                    'bank_code'          => 'ABA',
-                    'trx_id'             => $trxId,
-                    'apv'                => trim($match['apv']),
-                    'payment_date'       => $paymentDate,
-                    'report_date'        => $paymentDate->toDateString(),
-                    'report_month'       => $paymentDate->month,
-                    'report_year'        => $paymentDate->year,
-                    'raw_message'        => $text,
-                    'status'             => 'success',
-                    'parsed_successfully'=> true,
-                    'is_duplicate'       => (bool) $existingPayment,
-                ]
-            );
-    
-            $group?->update(['last_payment_at' => now()]);
-    
+        }
+
+        // ----------------------------------------------------------------
+        // Clean text — strip forwarded prefixes before regex matching:
+        //   "@PayWayByABA_bot ៛100 paid by ..."
+        //   "[12 Jun 2026 at 4:44:37 in the afternoon]:\n$100 paid by ..."
+        //   "...100 paid by ..." (Telegram truncation)
+        // ----------------------------------------------------------------
+        $cleanText = $text;
+        $cleanText = preg_replace('/^@\S+\s+/u', '', $cleanText);          // @BotName prefix
+        $cleanText = preg_replace('/^\[.*?\]:\s*/us', '', $cleanText);      // [date header]:
+        $cleanText = preg_replace('/^\.{3}/u', '', $cleanText);             // ... truncation dots
+        $cleanText = trim($cleanText);
+
+        // ----------------------------------------------------------------
+        // Regex — matches:
+        //   ៛100 paid by NAME (*acc) on Jun 12, 04:44 PM via METHOD at MERCHANT. Trx. ID: 123, APV: 456
+        //   $100 paid by ...
+        //   100 paid by ...  (no currency symbol after stripping)
+        // ----------------------------------------------------------------
+        preg_match(
+            '/(?P<currency_sym>[៛$])?(?P<amount>[\d,]+(?:\.\d+)?)\s+paid by\s+(?P<payer_name>.+?)\s+\((?P<payer_account>[^)]+)\)\s+on\s+(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{1,2}:\d{2}\s*(?:AM|PM))\s+via\s+(?P<method>.+?)\s+at\s+(?P<merchant>.+?)\.\s+Trx\.\s*ID:\s*(?P<trx_id>\d+),\s*APV:\s*(?P<apv>\d+)/ui',
+            $cleanText,
+            $match
+        );
+
+        if (!isset($match['trx_id'])) {
+            Log::warning('ABA parse failed', [
+                'original_text' => $text,
+                'clean_text'    => $cleanText,
+                'chat_id'       => $telegramChatId,
+            ]);
+
+            $payment = TelegramPayment::create([
+                'user_id'             => $userId,
+                'subscription_id'     => $subscriptionId,
+                'telegram_group_id'   => $telegramGroupId,
+                'raw_message'         => $text,
+                'status'              => 'pending',
+                'parsed_successfully' => false,
+                'is_duplicate'        => false,
+            ]);
+
             return response()->json([
                 'ok'              => true,
-                'message'         => 'ABA payment saved',
+                'message'         => 'Text saved but not parsed',
                 'telegram_chat_id'=> $telegramChatId,
+                'clean_text'      => $cleanText,   // helpful for debugging
                 'found_group'     => (bool) $group,
-                'user_id'         => $userId,
-                'subscription_id' => $subscriptionId,
-                'telegram_group_id' => $telegramGroupId,
-                'is_duplicate'    => (bool) $existingPayment,
                 'data'            => $payment,
             ]);
-    
-        } catch (\Throwable $e) {
-            Log::error('ABA payment save error', [
-                'message' => $e->getMessage(),
-                'line'    => $e->getLine(),
-                'file'    => $e->getFile(),
-            ]);
-    
-            return response()->json([
-                'ok'      => false,
-                'message' => $e->getMessage(),
-                'line'    => $e->getLine(),
-                'file'    => $e->getFile(),
-            ], 500);
         }
+
+        // ----------------------------------------------------------------
+        // Currency
+        // ----------------------------------------------------------------
+        $currency = ($match['currency_sym'] ?? '') === '៛' ? 'KHR' : 'USD';
+
+        // ----------------------------------------------------------------
+        // Date — "Jun 12, 04:44 PM"
+        // ----------------------------------------------------------------
+        try {
+            $paymentDate = Carbon::createFromFormat('M d, h:i A', trim($match['date']))
+                ->year(now()->year);
+        } catch (\Throwable $e) {
+            try {
+                $cleanDate   = preg_replace('/\s+/', ' ', trim($match['date']));
+                $paymentDate = Carbon::parse($cleanDate);
+            } catch (\Throwable $e2) {
+                $paymentDate = now();
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Duplicate check + upsert
+        // ----------------------------------------------------------------
+        $trxId           = trim($match['trx_id']);
+        $existingPayment = TelegramPayment::where('trx_id', $trxId)->first();
+
+        $payment = TelegramPayment::updateOrCreate(
+            ['trx_id' => $trxId],
+            [
+                'user_id'             => $userId,
+                'subscription_id'     => $subscriptionId,
+                'telegram_group_id'   => $telegramGroupId,
+                'currency'            => $currency,
+                'amount'              => (float) str_replace(',', '', $match['amount']),
+                'payer_name'          => trim($match['payer_name']),
+                'payer_account'       => trim($match['payer_account']),
+                'merchant_name'       => trim($match['merchant']),
+                'payment_method'      => trim($match['method']),
+                'bank_code'           => 'ABA',
+                'trx_id'              => $trxId,
+                'apv'                 => trim($match['apv']),
+                'payment_date'        => $paymentDate,
+                'report_date'         => $paymentDate->toDateString(),
+                'report_month'        => $paymentDate->month,
+                'report_year'         => $paymentDate->year,
+                'raw_message'         => $text,       // always store original
+                'status'              => 'success',
+                'parsed_successfully' => true,
+                'is_duplicate'        => (bool) $existingPayment,
+            ]
+        );
+
+        $group?->update(['last_payment_at' => now()]);
+
+        return response()->json([
+            'ok'               => true,
+            'message'          => 'ABA payment saved',
+            'telegram_chat_id' => $telegramChatId,
+            'found_group'      => (bool) $group,
+            'user_id'          => $userId,
+            'subscription_id'  => $subscriptionId,
+            'telegram_group_id'=> $telegramGroupId,
+            'is_duplicate'     => (bool) $existingPayment,
+            'data'             => $payment,
+        ]);
+
+    } catch (\Throwable $e) {
+        Log::error('ABA payment save error', [
+            'message' => $e->getMessage(),
+            'line'    => $e->getLine(),
+            'file'    => $e->getFile(),
+        ]);
+
+        return response()->json([
+            'ok'      => false,
+            'message' => $e->getMessage(),
+            'line'    => $e->getLine(),
+            'file'    => $e->getFile(),
+        ], 500);
     }
+}
 
     private function startAccount(array $chat, array $from)
     {
