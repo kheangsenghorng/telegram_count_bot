@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\TelegramGroup;
 use App\Models\TelegramPayment;
 use App\Models\User;
+use App\Models\UserSubscription;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -26,13 +27,39 @@ class TelegramPaymentWebhookController extends Controller
 
             $user = User::where('telegram_id', $telegramUserId)->first();
 
-            $group = TelegramGroup::where('group_id', $telegramChatId)
-                ->where('status', 'connected')
+            if (!$user) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => 'User not found by telegram_id',
+                    'telegram_user_id' => $telegramUserId,
+                ], 404);
+            }
+
+            $userId = $user->uuid;
+
+            $subscription = UserSubscription::where('user_id', $userId)
+                ->where('status', 'active')
+                ->latest()
                 ->first();
 
-            $userId = $group?->user_id ?? $user?->uuid;
+            if (!$subscription) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => 'Active subscription not found for this user',
+                    'user_id' => $userId,
+                    'telegram_user_id' => $telegramUserId,
+                ], 404);
+            }
+
+            $subscriptionId = $subscription->userSubscriptionsID;
+
+            $group = TelegramGroup::where('user_id', $userId)
+                ->where('subscription_id', $subscriptionId)
+                ->where('status', 'connected')
+                ->latest()
+                ->first();
+
             $telegramGroupId = $group?->telegramGroupsID;
-            $subscriptionId = $group?->subscription_id;
 
             preg_match(
                 '/^(?<currency>៛|\$)?(?<amount>[\d,.]+)\s+paid by\s+(?<payer_name>.*?)\s+\((?<payer_account>.*?)\)\s+on\s+(?<date>.*?)\s+via\s+(?<method>.*?)\s+at\s+(?<merchant>.*?)\.\s+Trx\. ID:\s+(?<trx_id>\d+),\s+APV:\s+(?<apv>\d+)/u',
@@ -56,7 +83,9 @@ class TelegramPaymentWebhookController extends Controller
                     'message' => 'Text saved but not parsed',
                     'telegram_user_id' => $telegramUserId,
                     'telegram_chat_id' => $telegramChatId,
-                    'found_user' => (bool) $user,
+                    'user_id' => $userId,
+                    'subscription_id' => $subscriptionId,
+                    'telegram_group_id' => $telegramGroupId,
                     'found_group' => (bool) $group,
                     'data' => $payment,
                 ]);
@@ -111,11 +140,10 @@ class TelegramPaymentWebhookController extends Controller
                 'message' => 'Payment saved',
                 'telegram_user_id' => $telegramUserId,
                 'telegram_chat_id' => $telegramChatId,
-                'found_user' => (bool) $user,
-                'found_group' => (bool) $group,
                 'user_id' => $userId,
-                'telegram_group_id' => $telegramGroupId,
                 'subscription_id' => $subscriptionId,
+                'telegram_group_id' => $telegramGroupId,
+                'found_group' => (bool) $group,
                 'data' => $payment,
             ]);
 
