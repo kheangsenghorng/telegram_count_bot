@@ -9,7 +9,6 @@ Route::prefix('telegram')->group(function () {
 
     Route::post('/webhook', [TelegramWebhookController::class, 'webhook']);
 
-    Route::post('/payment-webhook', [TelegramPaymentWebhookController::class, 'webhook']);
 
     Route::get('/test', [TelegramWebhookController::class, 'testMessage']);
     Route::get('/set-webhook', [TelegramWebhookController::class, 'setWebhook']);
