@@ -237,31 +237,28 @@ class TelegramWebhookController extends Controller
         $subscriptionKey = $parts[1] ?? null;
     
         if (!$subscriptionKey) {
+
             $telegramId = (string) ($from['id'] ?? '');
-    
+        
             $subscription = UserSubscription::with(['package', 'user'])
-            ->where('status', 'active')
-            ->whereHas('user', function ($query) use ($telegramId) {
-                $query->where('telegram_id', $telegramId);
-            })
-            ->latest()
-            ->first();
-    
+                ->where('status', 'active')
+                ->whereHas('user', function ($query) use ($telegramId) {
+                    $query->where('telegram_id', $telegramId);
+                })
+                ->latest()
+                ->first();
+        
             if (!$subscription) {
                 $this->sendMessage(
                     $chatId,
-                    "❌ No active subscription found for Telegram ID: {$telegramId}\n\nPlease open bot private chat and send /start first."
+                    '❌ No active subscription found.'
                 );
-    
+        
                 return response()->json(['ok' => true]);
             }
-    
-            $this->sendMessage(
-                $chatId,
-                "🔗 Please connect using:\n\n/connect {$subscription->subscription_key}"
-            );
-    
-            return response()->json(['ok' => true]);
+        
+            // Use found subscription automatically
+            $subscriptionKey = $subscription->subscription_key;
         }
     
         $subscription = UserSubscription::with('package')
