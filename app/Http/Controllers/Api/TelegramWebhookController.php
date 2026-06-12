@@ -223,124 +223,112 @@ class TelegramWebhookController extends Controller
     // }
 
     private function connectGroup(array $chat, array $from, string $text)
-{
-    $chatId = (string) ($chat['id'] ?? '');
-    $chatTitle = $chat['title'] ?? null;
-    $chatType = $chat['type'] ?? 'private';
-
-    if (!in_array($chatType, ['group', 'supergroup'])) {
-        $this->sendMessage($chatId, '❌ Please use /connect inside Telegram group.');
-        return response()->json(['ok' => true]);
-    }
-
-    // Support:
-    // /connect bot_xxxxx
-    // /connect@posShope_bot bot_xxxxx
-    $parts = preg_split('/\s+/', trim($text));
-    $subscriptionKey = $parts[1] ?? null;
-
-    // If user sends only /connect or /connect@posShope_bot
-    if (!$subscriptionKey) {
-        $telegramId = (string) ($from['id'] ?? '');
-
-        $user = User::where('telegram_id', $telegramId)->first();
-
-        if (!$user) {
-            $this->sendMessage(
-                $chatId,
-                "❌ Please open bot private chat and send /start first."
-            );
-
+    {
+        $chatId = (string) ($chat['id'] ?? '');
+        $chatTitle = $chat['title'] ?? null;
+        $chatType = $chat['type'] ?? 'private';
+    
+        if (!in_array($chatType, ['group', 'supergroup'])) {
+            $this->sendMessage($chatId, '❌ Please use /connect inside Telegram group.');
             return response()->json(['ok' => true]);
         }
-
-        $subscription = UserSubscription::where('user_id', $user->id)
+    
+        $parts = preg_split('/\s+/', trim($text));
+        $subscriptionKey = $parts[1] ?? null;
+    
+        if (!$subscriptionKey) {
+            $telegramId = (string) ($from['id'] ?? '');
+    
+            $subscription = UserSubscription::with(['package', 'user'])
             ->where('status', 'active')
+            ->whereHas('user', function ($query) use ($telegramId) {
+                $query->where('telegram_id', $telegramId);
+            })
             ->latest()
             ->first();
-
-        if (!$subscription) {
+    
+            if (!$subscription) {
+                $this->sendMessage(
+                    $chatId,
+                    "❌ No active subscription found for Telegram ID: {$telegramId}\n\nPlease open bot private chat and send /start first."
+                );
+    
+                return response()->json(['ok' => true]);
+            }
+    
             $this->sendMessage(
                 $chatId,
-                "❌ You don't have active subscription.\n\nPlease create/buy token first."
+                "🔗 Please connect using:\n\n/connect {$subscription->subscription_key}"
             );
-
+    
             return response()->json(['ok' => true]);
         }
-
-        $this->sendMessage(
-            $chatId,
-            "🔗 Please connect using:\n\n/connect {$subscription->subscription_key}"
-        );
-
-        return response()->json(['ok' => true]);
-    }
-
-    $subscription = UserSubscription::with('package')
-        ->where('subscription_key', $subscriptionKey)
-        ->where('status', 'active')
-        ->first();
-
-    if (!$subscription) {
-        $this->sendMessage($chatId, '❌ Invalid or inactive subscription key.');
-        return response()->json(['ok' => true]);
-    }
-
-    if ($subscription->ends_at && now()->greaterThan($subscription->ends_at)) {
-        $this->sendMessage($chatId, '❌ Subscription expired.');
-        return response()->json(['ok' => true]);
-    }
-
-    $exists = TelegramGroup::where('group_id', $chatId)->first();
-
-    if ($exists) {
-        $this->sendMessage($chatId, '✅ This group is already connected.');
-        return response()->json(['ok' => true]);
-    }
-
-    $limit = $subscription->override_group_limit ?? $subscription->package?->group_limit;
-
-    $currentGroups = TelegramGroup::where('subscription_id', $subscription->userSubscriptionsID)
-        ->where('status', 'connected')
-        ->count();
-
-    if ($limit !== null && $currentGroups >= $limit) {
-        $this->sendMessage($chatId, '❌ Group limit reached for this package.');
-        return response()->json(['ok' => true]);
-    }
-
-    TelegramGroup::create([
-        'user_id' => $subscription->user_id,
-        'subscription_id' => $subscription->userSubscriptionsID,
-        'group_id' => $chatId,
-        'group_name' => $chatTitle,
-        'group_type' => $chatType,
-        'telegram_username' => $from['username'] ?? null,
-        'bot_added_at' => now(),
-        'connected_at' => now(),
-        'status' => 'connected',
-    ]);
-
-    $subscription->increment('group_used');
-
-    SubscriptionUsageLog::create([
-        'subscription_id' => $subscription->userSubscriptionsID,
-        'user_id' => $subscription->user_id,
-        'type' => 'group',
-        'action' => 'connected',
-        'value' => 1,
-        'description' => 'Telegram group connected',
-        'metadata' => [
+    
+        $subscription = UserSubscription::with('package')
+            ->where('subscription_key', $subscriptionKey)
+            ->where('status', 'active')
+            ->first();
+    
+        if (!$subscription) {
+            $this->sendMessage($chatId, '❌ Invalid or inactive subscription key.');
+            return response()->json(['ok' => true]);
+        }
+    
+        if ($subscription->ends_at && now()->greaterThan($subscription->ends_at)) {
+            $this->sendMessage($chatId, '❌ Subscription expired.');
+            return response()->json(['ok' => true]);
+        }
+    
+        $exists = TelegramGroup::where('group_id', $chatId)->first();
+    
+        if ($exists) {
+            $this->sendMessage($chatId, '✅ This group is already connected.');
+            return response()->json(['ok' => true]);
+        }
+    
+        $limit = $subscription->override_group_limit ?? $subscription->package?->group_limit;
+    
+        $currentGroups = TelegramGroup::where('subscription_id', $subscription->userSubscriptionsID)
+            ->where('status', 'connected')
+            ->count();
+    
+        if ($limit !== null && $currentGroups >= $limit) {
+            $this->sendMessage($chatId, '❌ Group limit reached for this package.');
+            return response()->json(['ok' => true]);
+        }
+    
+        TelegramGroup::create([
+            'user_id' => $subscription->user_id,
+            'subscription_id' => $subscription->userSubscriptionsID,
             'group_id' => $chatId,
             'group_name' => $chatTitle,
             'group_type' => $chatType,
-        ],
-    ]);
-
-    $this->sendMessage($chatId, "✅ Group connected successfully!\nGroup: {$chatTitle}");
-
-    return response()->json(['ok' => true]);
-}
+            'telegram_username' => $from['username'] ?? null,
+            'bot_added_at' => now(),
+            'connected_at' => now(),
+            'status' => 'connected',
+        ]);
+    
+        $subscription->increment('group_used');
+    
+        SubscriptionUsageLog::create([
+            'subscription_id' => $subscription->userSubscriptionsID,
+            'user_id' => $subscription->user_id,
+            'type' => 'group',
+            'action' => 'connected',
+            'value' => 1,
+            'description' => 'Telegram group connected',
+            'metadata' => [
+                'group_id' => $chatId,
+                'group_name' => $chatTitle,
+                'group_type' => $chatType,
+            ],
+        ]);
+    
+        $this->sendMessage($chatId, "✅ Group connected successfully!\nGroup: {$chatTitle}");
+    
+        return response()->json(['ok' => true]);
+    }
 
     public function webhookInfo()
     {
