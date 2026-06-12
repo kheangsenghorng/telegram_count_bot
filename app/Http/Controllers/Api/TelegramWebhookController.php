@@ -34,9 +34,14 @@ class TelegramWebhookController extends Controller
         }
 
         // ABA payment message
-        if (str_contains($text, 'paid by') && str_contains($text, 'Trx. ID')) {
+        if (
+            str_contains($text, 'paid by') &&
+            str_contains($text, 'Trx. ID') &&
+            str_contains($text, 'APV:')
+        ) {
             return $this->storeAbaPayment($request, $text);
         }
+        
 
         if (str_starts_with($text, '/start')) {
             return $this->startAccount($chat, $from);
@@ -82,8 +87,8 @@ class TelegramWebhookController extends Controller
                 ->latest()
                 ->first();
     
-            $userId = $group?->user_id;
-            $subscriptionId = $group?->subscription_id;
+            $userId          = $group?->user_id;
+            $subscriptionId  = $group?->subscription_id;
             $telegramGroupId = $group?->telegramGroupsID;
     
             if (!$group) {
@@ -96,95 +101,127 @@ class TelegramWebhookController extends Controller
                 );
             }
     
+            // ----------------------------------------------------------------
+            // Regex — handles both formats:
+            //   $100 paid by ...   (USD, full amount)
+            //   ៛100 paid by ...   (KHR)
+            //   ...100 paid by ... (truncated — treat as USD)
+            //   Date: "Jun 12, 04:44 PM"
+            // ----------------------------------------------------------------
             preg_match(
-                '/^(?<currency>៛|\$)?(?<amount>[\d,.]+)\s+paid by\s+(?<payer_name>.*?)\s+\((?<payer_account>.*?)\)\s+on\s+(?<date>.*?)\s+via\s+(?<method>.*?)\s+at\s+(?<merchant>.*?)\.\s+Trx\. ID:\s+(?<trx_id>\d+),\s+APV:\s+(?<apv>\d+)/u',
+                '/(?P<currency_sym>[៛$]|\.{3})?(?P<amount>[\d,]+(?:\.\d+)?)\s+paid by\s+(?P<payer_name>.+?)\s+\((?P<payer_account>[^)]+)\)\s+on\s+(?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{1,2}:\d{2}\s*(?:AM|PM))\s+via\s+(?P<method>.+?)\s+at\s+(?P<merchant>.+?)\.\s+Trx\.\s*ID:\s*(?P<trx_id>\d+),\s*APV:\s*(?P<apv>\d+)/ui',
                 $text,
                 $match
             );
     
-            if (!$match) {
+            if (!isset($match['trx_id'])) {
                 $payment = TelegramPayment::create([
-                    'user_id' => $userId,
-                    'subscription_id' => $subscriptionId,
-                    'telegram_group_id' => $telegramGroupId,
-                    'raw_message' => $text,
-                    'status' => 'pending',
-                    'parsed_successfully' => false,
-                    'is_duplicate' => false,
+                    'user_id'            => $userId,
+                    'subscription_id'    => $subscriptionId,
+                    'telegram_group_id'  => $telegramGroupId,
+                    'raw_message'        => $text,
+                    'status'             => 'pending',
+                    'parsed_successfully'=> false,
+                    'is_duplicate'       => false,
                 ]);
     
                 return response()->json([
-                    'ok' => true,
-                    'message' => 'Text saved but not parsed',
+                    'ok'             => true,
+                    'message'        => 'Text saved but not parsed',
                     'telegram_chat_id' => $telegramChatId,
-                    'found_group' => (bool) $group,
-                    'data' => $payment,
+                    'found_group'    => (bool) $group,
+                    'data'           => $payment,
                 ]);
             }
     
-            try {
-                $paymentDate = Carbon::createFromFormat('M d, h:i A', trim($match['date']))
-                    ->year(now()->year);
-            } catch (\Throwable $e) {
-                $paymentDate = now();
+            // ----------------------------------------------------------------
+            // Currency — '...' prefix means Telegram truncated the $ symbol
+            // ----------------------------------------------------------------
+            $currencySym = $match['currency_sym'] ?? '';
+            if ($currencySym === '៛') {
+                $currency = 'KHR';
+            } else {
+                // '$' or '...' (truncated USD) or blank
+                $currency = 'USD';
             }
     
-            $trxId = trim($match['trx_id']);
+            // ----------------------------------------------------------------
+            // Date — "Jun 12, 04:44 PM"
+            // ----------------------------------------------------------------
+            try {
+                $paymentDate = Carbon::createFromFormat(
+                    'M d, h:i A',
+                    trim($match['date'])
+                )->year(now()->year);
+            } catch (\Throwable $e) {
+                try {
+                    // Fallback: strip extra spaces and retry
+                    $cleanDate = preg_replace('/\s+/', ' ', trim($match['date']));
+                    $paymentDate = Carbon::parse($cleanDate);
+                } catch (\Throwable $e2) {
+                    $paymentDate = now();
+                }
+            }
+    
+            // ----------------------------------------------------------------
+            // Duplicate check
+            // ----------------------------------------------------------------
+            $trxId          = trim($match['trx_id']);
             $existingPayment = TelegramPayment::where('trx_id', $trxId)->first();
     
             $payment = TelegramPayment::updateOrCreate(
                 ['trx_id' => $trxId],
                 [
-                    'user_id' => $userId,
-                    'subscription_id' => $subscriptionId,
-                    'telegram_group_id' => $telegramGroupId,
+                    'user_id'            => $userId,
+                    'subscription_id'    => $subscriptionId,
+                    'telegram_group_id'  => $telegramGroupId,
     
-                    'currency' => $match['currency'] === '៛' ? 'KHR' : 'USD',
-                    'amount' => str_replace(',', '', $match['amount']),
-                    'payer_name' => trim($match['payer_name']),
-                    'payer_account' => trim($match['payer_account']),
-                    'merchant_name' => trim($match['merchant']),
-                    'payment_method' => trim($match['method']),
-                    'bank_code' => 'ABA',
-                    'trx_id' => $trxId,
-                    'apv' => trim($match['apv']),
-                    'payment_date' => $paymentDate,
-                    'report_date' => $paymentDate->toDateString(),
-                    'report_month' => $paymentDate->month,
-                    'report_year' => $paymentDate->year,
-                    'raw_message' => $text,
-                    'status' => 'success',
-                    'parsed_successfully' => true,
-                    'is_duplicate' => $existingPayment ? true : false,
+                    'currency'           => $currency,
+                    'amount'             => (float) str_replace(',', '', $match['amount']),
+                    'payer_name'         => trim($match['payer_name']),
+                    'payer_account'      => trim($match['payer_account']),
+                    'merchant_name'      => trim($match['merchant']),
+                    'payment_method'     => trim($match['method']),
+                    'bank_code'          => 'ABA',
+                    'trx_id'             => $trxId,
+                    'apv'                => trim($match['apv']),
+                    'payment_date'       => $paymentDate,
+                    'report_date'        => $paymentDate->toDateString(),
+                    'report_month'       => $paymentDate->month,
+                    'report_year'        => $paymentDate->year,
+                    'raw_message'        => $text,
+                    'status'             => 'success',
+                    'parsed_successfully'=> true,
+                    'is_duplicate'       => (bool) $existingPayment,
                 ]
             );
     
-            $group?->update([
-                'last_payment_at' => now(),
-            ]);
+            $group?->update(['last_payment_at' => now()]);
     
             return response()->json([
-                'ok' => true,
-                'message' => 'ABA payment saved',
-                'telegram_chat_id' => $telegramChatId,
-                'found_group' => (bool) $group,
-                'user_id' => $userId,
+                'ok'              => true,
+                'message'         => 'ABA payment saved',
+                'telegram_chat_id'=> $telegramChatId,
+                'found_group'     => (bool) $group,
+                'user_id'         => $userId,
                 'subscription_id' => $subscriptionId,
                 'telegram_group_id' => $telegramGroupId,
-                'data' => $payment,
+                'is_duplicate'    => (bool) $existingPayment,
+                'data'            => $payment,
             ]);
+    
         } catch (\Throwable $e) {
             Log::error('ABA payment save error', [
                 'message' => $e->getMessage(),
-                'line' => $e->getLine(),
-                'file' => $e->getFile(),
+                'line'    => $e->getLine(),
+                'file'    => $e->getFile(),
             ]);
     
             return response()->json([
-                'ok' => false,
+                'ok'      => false,
                 'message' => $e->getMessage(),
-                'line' => $e->getLine(),
-                'file' => $e->getFile(),
+                'line'    => $e->getLine(),
+                'file'    => $e->getFile(),
             ], 500);
         }
     }
