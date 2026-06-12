@@ -3,23 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\PackageController;
 use App\Http\Controllers\Api\SubscriptionUsageLogController;
-use App\Http\Controllers\Api\TelegramPaymentController;
-use App\Http\Controllers\Api\TelegramPaymentWebhookController;
 use App\Http\Controllers\Api\UserSubscriptionController;
-
-/*
-|--------------------------------------------------------------------------
-| Public Webhook
-|--------------------------------------------------------------------------
-*/
-
-Route::post('telegram-payment/webhook', [TelegramPaymentWebhookController::class, 'webhook']);
-
-/*
-|--------------------------------------------------------------------------
-| Customer Routes
-|--------------------------------------------------------------------------
-*/
 
 Route::middleware(['auth:api', 'role:user'])
     ->prefix('customer')
@@ -37,13 +21,6 @@ Route::middleware(['auth:api', 'role:user'])
             [UserSubscriptionController::class, 'cancel']
         );
 
-        Route::apiResource(
-            'subscription-logs',
-            SubscriptionUsageLogController::class
-        )->only(['index', 'show']);
-
-        Route::apiResource(
-            'telegram-payments',
-            TelegramPaymentController::class
-        );
+        Route::apiResource('subscription-logs', SubscriptionUsageLogController::class)
+            ->only(['index', 'show']);
     });
