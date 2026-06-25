@@ -27,30 +27,24 @@ class TelegramBotService
 
     public function sendMessage(string|int $chatId, string $text, array $extra = []): bool|array
     {
-        if (! $this->token() || ! $chatId) {
-            Log::warning('TelegramBotService: missing token or chatId');
-            return false;
+        $payload = [
+            'chat_id'    => $chatId,
+            'text'       => $text,
+            'parse_mode' => 'Markdown',
+        ];
+    
+        foreach ($extra as $key => $value) {
+            $payload[$key] = ($key === 'reply_markup' && is_array($value))
+                ? json_encode($value)
+                : $value;
         }
-
-        $response = Http::post($this->apiUrl('sendMessage'), array_merge([
-            'chat_id' => $chatId,
-            'text'    => $text,
-        ], $extra));
-
-        if (! $response->successful()) {
-            Log::warning('Telegram sendMessage failed', [
-                'chat_id' => $chatId,
-                'status'  => $response->status(),
-                'body'    => $response->body(),
-            ]);
-        }
-
-        return $response->json();
+    
+        return $this->request('sendMessage', $payload);
     }
 
     public function sendMarkdown(string|int $chatId, string $text): bool|array
     {
-        return $this->sendMessage($chatId, $text, ['parse_mode' => 'Markdown']);
+        return $this->sendMessage($chatId, $text);
     }
 
     public function sendMainMenu(string|int $chatId, string $text): bool|array
@@ -58,9 +52,9 @@ class TelegramBotService
         return $this->sendMessage($chatId, $text, [
             'reply_markup' => [
                 'keyboard' => [
-                    [['text' => '🆕 New Token'], ['text' => '🔑 My Tokens']],
-                    [['text' => '🌐 Domains'],   ['text' => '💬 Support']],
-                    [['text' => '🔒 Privacy Policy'], ['text' => '📜 Terms of Service']],
+                    [['text' => '🆕 Package'],        ['text' => '🔑 My Tokens']],
+                    [['text' => '🌐 Domains'],         ['text' => '💬 Support']],
+                    [['text' => '🔒 Privacy Policy'],  ['text' => '📜 Terms of Service']],
                 ],
                 'resize_keyboard'   => true,
                 'one_time_keyboard' => false,
@@ -196,17 +190,29 @@ class TelegramBotService
         return $response->json();
     }
 
-    public function editMessage(string|int $chatId, int $messageId, string $text): array
-    {
-        $response = Http::post($this->apiUrl('editMessageText'), [
-            'chat_id'      => $chatId,
-            'message_id'   => $messageId,
-            'text'         => $text,
-            'parse_mode'   => 'Markdown',
-            'reply_markup' => json_encode($this->mainStatsKeyboard()),
-        ]);
+    // ── editMessage now accepts optional inline keyboard ──────────────────────
+    public function editMessage(
+        string|int $chatId,
+        int        $messageId,
+        string     $text,
+        array      $inlineKeyboard = []   // ← added
+    ): array {
+        $payload = [
+            'chat_id'    => $chatId,
+            'message_id' => $messageId,
+            'text'       => $text,
+            'parse_mode' => 'Markdown',
+        ];
 
-        return $response->json();
+        if (! empty($inlineKeyboard)) {
+            $payload['reply_markup'] = json_encode([
+                'inline_keyboard' => $inlineKeyboard,
+            ]);
+        } else {
+            $payload['reply_markup'] = json_encode($this->mainStatsKeyboard());
+        }
+
+        return Http::post($this->apiUrl('editMessageText'), $payload)->json();
     }
 
     public function answerCallbackQuery(string $callbackQueryId, string $text = ''): array
@@ -284,5 +290,15 @@ class TelegramBotService
 
         $status = $response['result']['status'] ?? '';
         return in_array($status, ['administrator', 'creator'], true);
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal HTTP
+    // -------------------------------------------------------------------------
+
+    private function request(string $method, array $payload): bool|array
+    {
+        $response = Http::post($this->apiUrl($method), $payload);
+        return $response->json() ?? false;
     }
 }

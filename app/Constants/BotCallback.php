@@ -23,4 +23,6 @@ class BotCallback
     const PATTERN_WEEK  = '/^stats_week_([1-4])$/';
     const PATTERN_MONTH = '/^stats_month_(\d{1,2})$/';
     const PATTERN_YEAR  = '/^stats_year_(\d{4})$/';
+    const PACKAGE_BUY_PREFIX  = 'pkg_buy_';
+    const PATTERN_PACKAGE_BUY = '/^pkg_buy_(.+)$/';
 }

@@ -29,10 +29,11 @@ class Package extends Model
     ];
 
     protected $casts = [
-        'price' => 'decimal:2',
+        'price'         => 'float',   // ← change from 'decimal:2'
         'payment_limit' => 'integer',
-        'group_limit' => 'integer',
+        'group_limit'   => 'integer',
     ];
+    
 
     protected static function boot()
     {
