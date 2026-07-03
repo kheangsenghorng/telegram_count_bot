@@ -11,39 +11,41 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
 
-class AbaPaymentService
+class ChipMongPaymentService
 {
     private const CURRENCY_MAP = [
-        '៛'  => 'KHR',
-        '$'  => 'USD',
-        '＄' => 'USD',
+        'KHR' => 'KHR',
+        'USD' => 'USD',
+        '៛'   => 'KHR',
+        '$'   => 'USD',
+        '＄'  => 'USD',
     ];
 
     /**
      * Supports:
      *
-     * $2.50 paid by Sreyla Botum (*948) on Jun 28, 06:11 PM via ABA KHQR (Wing Bank (Cambodia) Plc) at CHEN KHEANG. Trx. ID: 178264507253336, APV: 437425.
+     * ACLEDA to Chip Mong Pay KHR 6,500 is paid by ACLEDA Bank Plc. via KHQR for purchase 540abedd. From Keo Sorany, at CHEN KHEANG, date Jul 01, 2026 11:30 AM
      *
-     * ៛4,000 paid by BORN SOPHEAK (*021) on Jun 28, 06:13 PM via ABA PAY at CHEN KHEANG. Trx. ID: 178264518833769, APV: 350810.
+     * KHR 19,000 is paid by ACLEDA Bank Plc. via KHQR for purchase 81fda03b. From Oum Socheata, at CHEN KHEANG, date Jun 29, 2026 07:28 PM
+     *
+     * KHR 6,500 is paid by ACLEDA Bank Plc. via KHQR for purchase 540abedd. From Keo Sorany, at CHEN KHEANG, Merchant account, date Jul 1, 2026 11:30 AM
      */
     private const PATTERN = '/
-        (?P<currency_symbol>[៛\$＄])
+        (?:ACLEDA\s+to\s+(?P<merchant>.+?)\s+)?
+        (?P<currency_code>KHR|USD|[៛\$＄])
         \s*
         (?P<amount>[\d,]+(?:\.\d+)?)
-        \s+paid\s+by\s+
+        \s+is\s+paid\s+by\s+
+        (?P<bank>.+?)
+        \s+via\s+KHQR\s+for\s+purchase\s+
+        (?P<order_ref>[A-Za-z0-9]+)
+        \.\s+From\s+
         (?P<payer_name>.+?)
-        \s+\((?P<payer_account>[^)]+)\)
-        \s+on\s+
-        (?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{1,2}:\d{2}\s*(?:AM|PM))
-        \s+via\s+
-        (?P<method>ABA\s+.+?)
-        (?:\s+\((?P<bank_code>.+?)\))?
-        \s+at\s+
-        (?P<merchant>.+?)
-        \.\s+Trx\.\s*ID:\s*
-        (?P<trx_id>\d+)
-        ,\s*APV:\s*
-        (?P<apv>\d+)
+        ,\s+at\s+
+        (?P<location>.+?)
+        (?:,\s+(?P<account_type>.+?))?
+        ,\s+date\s+
+        (?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))
     /uix';
 
     public function __construct(
@@ -58,54 +60,12 @@ class AbaPaymentService
     {
         $group = $this->findGroup($telegramChatId);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Require a fully linked group → otherwise do not store anything
-        |--------------------------------------------------------------------------
-        | The group must exist AND have user_id, subscription_id, and
-        | telegramGroupsID. If any of these is missing, skip DB entirely.
-        */
-        if (
-            ! $group
-            || ! $group->user_id
-            || ! $group->subscription_id
-            || ! $group->telegramGroupsID
-        ) {
-            Log::notice('ABA payment ignored: group not fully linked, nothing stored', [
-                'chat_id' => $telegramChatId,
-                'group_found' => (bool) $group,
-                'user_id' => $group?->user_id,
-                'subscription_id' => $group?->subscription_id,
-                'telegram_group_id' => $group?->telegramGroupsID,
-            ]);
-
-            return [
-                'parsed' => false,
-                'group' => $group,
-                'payment' => null,
-                'payments' => [],
-                'currency' => null,
-                'is_duplicate' => false,
-                'count' => 0,
-                'success_count' => 0,
-                'duplicate_count' => 0,
-                'skipped' => true,
-            ];
-        }
-
-        $userId = $group->user_id;
-        $subscriptionId = $group->subscription_id;
-        $telegramGroupId = $group->telegramGroupsID;
+        $userId = $group?->user_id;
+        $subscriptionId = $group?->subscription_id;
+        $telegramGroupId = $group?->telegramGroupsID;
 
         $cleanText = $this->cleanText($rawText);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Find all ABA payments in one Telegram message
-        |--------------------------------------------------------------------------
-        | preg_match() only gets one payment.
-        | preg_match_all() gets all payments.
-        */
         preg_match_all(self::PATTERN, $cleanText, $matches, PREG_SET_ORDER);
 
         // ---------------------------------------------------------------------
@@ -113,7 +73,7 @@ class AbaPaymentService
         // ---------------------------------------------------------------------
 
         if (empty($matches)) {
-            Log::warning('ABA parse failed', [
+            Log::warning('ChipMong (ACLEDA) parse failed', [
                 'chat_id' => $telegramChatId,
                 'original' => $rawText,
                 'clean' => $cleanText,
@@ -130,13 +90,15 @@ class AbaPaymentService
                 'is_duplicate' => false,
             ]);
 
-            $this->telegram->sendMarkdown(
-                $telegramChatId,
-                "⚠️ *ABA Payment Received — Parse Failed*\n\n"
-                . "Could not read the message automatically.\n"
-                . "Raw text saved for manual review.\n\n"
-                . "```\n{$cleanText}\n```"
-            );
+            if ($group) {
+                $this->telegram->sendMarkdown(
+                    $telegramChatId,
+                    "⚠️ *ACLEDA/Chip Mong Payment Received — Parse Failed*\n\n"
+                    . "Could not read the message automatically.\n"
+                    . "Raw text saved for manual review.\n\n"
+                    . "```\n{$cleanText}\n```"
+                );
+            }
 
             return [
                 'parsed' => false,
@@ -148,7 +110,6 @@ class AbaPaymentService
                 'count' => 0,
                 'success_count' => 0,
                 'duplicate_count' => 0,
-                'skipped' => false,
             ];
         }
 
@@ -161,21 +122,20 @@ class AbaPaymentService
         $successCount = 0;
 
         foreach ($matches as $match) {
-            $currency = $this->detectCurrency($match['currency_symbol'] ?? '');
+            $currency = $this->detectCurrency($match['currency_code'] ?? '');
             $paymentDate = $this->parseDate($match['date']);
-            $trxId = trim($match['trx_id']);
+            $orderRef = trim($match['order_ref']);
 
             $amount = (float) str_replace(',', '', $match['amount']);
             $payerName = trim($match['payer_name']);
-            $payerAccount = trim($match['payer_account']);
-            $merchant = trim($match['merchant']);
-            $method = trim($match['method']);
-            $bankCode = ! empty($match['bank_code']) ? trim($match['bank_code']) : null;
-            $apv = trim($match['apv']);
+            $bank = trim($match['bank']);
+            $merchant = ! empty($match['merchant']) ? trim($match['merchant']) : 'Chip Mong Pay';
+            $location = trim($match['location']);
+            $accountType = ! empty($match['account_type']) ? trim($match['account_type']) : null;
 
             $payment = TelegramPayment::updateOrCreate(
                 [
-                    'trx_id' => $trxId,
+                    'trx_id' => $orderRef,
                 ],
                 [
                     'user_id' => $userId,
@@ -185,12 +145,12 @@ class AbaPaymentService
                     'currency' => $currency,
                     'amount' => $amount,
                     'payer_name' => $payerName,
-                    'payer_account' => $payerAccount,
+                    'payer_account' => $accountType,
                     'merchant_name' => $merchant,
-                    'payment_method' => $method,
-                    'bank_code' => $bankCode,
-                    'trx_id' => $trxId,
-                    'apv' => $apv,
+                    'payment_method' => 'ACLEDA KHQR',
+                    'bank_code' => $bank,
+                    'trx_id' => $orderRef,
+                    'apv' => null,
 
                     'payment_date' => $paymentDate,
                     'report_date' => $paymentDate->toDateString(),
@@ -216,36 +176,26 @@ class AbaPaymentService
                 $successCount++;
                 $this->incrementPaymentUsed($subscriptionId);
 
-                $this->sendPaymentAlert(
-                    telegramChatId: $telegramChatId,
-                    amount: $amount,
-                    currency: $currency,
-                    payerName: $payerName,
-                    payerAccount: $payerAccount,
-                    merchant: $merchant,
-                    method: $method,
-                    bankCode: $bankCode,
-                    paymentDate: $paymentDate,
-                    trxId: $trxId,
-                    apv: $apv,
-                );
+                if ($group) {
+                    $this->sendPaymentAlert(
+                        telegramChatId: $telegramChatId,
+                        amount: $amount,
+                        currency: $currency,
+                        payerName: $payerName,
+                        bank: $bank,
+                        merchant: $merchant,
+                        location: $location,
+                        accountType: $accountType,
+                        paymentDate: $paymentDate,
+                        orderRef: $orderRef,
+                    );
+                }
             }
 
             $savedPayments[] = $payment;
-
-            Log::info('ABA payment saved', [
-                'trx_id' => $trxId,
-                'amount' => $amount,
-                'currency' => $currency,
-                'payer' => $payerName,
-                'merchant' => $merchant,
-                'method' => $method,
-                'bank_code' => $bankCode,
-                'is_duplicate' => $isDuplicate,
-            ]);
         }
 
-        $group->update([
+        $group?->update([
             'last_payment_at' => now(),
         ]);
 
@@ -259,7 +209,6 @@ class AbaPaymentService
             'count' => count($savedPayments),
             'success_count' => $successCount,
             'duplicate_count' => $duplicateCount,
-            'skipped' => false,
         ];
     }
 
@@ -272,35 +221,38 @@ class AbaPaymentService
         float $amount,
         string $currency,
         string $payerName,
-        string $payerAccount,
+        string $bank,
         string $merchant,
-        string $method,
-        ?string $bankCode,
+        string $location,
+        ?string $accountType,
         Carbon $paymentDate,
-        string $trxId,
-        string $apv,
+        string $orderRef,
     ): void {
         $symbol = $currency === 'KHR' ? '៛' : '$';
         $decimals = $currency === 'KHR' ? 0 : 2;
 
         $formattedAmount = number_format($amount, $decimals);
-        $displayMethod = $bankCode ? "{$method} ({$bankCode})" : $method;
 
-        $message = implode("\n", [
-            "💳 *ABA Payment Received*",
+        $lines = [
+            "💳 *Chip Mong Payment Received (ACLEDA)*",
             "━━━━━━━━━━━━━━━━━━",
             "💰 *Amount:*    `{$symbol}{$formattedAmount}`",
-            "👤 *Payer:*     `{$payerName} ({$payerAccount})`",
+            "👤 *Payer:*     `{$payerName}`",
             "🏪 *Merchant:*  `{$merchant}`",
-            "📲 *Method:*    `{$displayMethod}`",
-            "📅 *Date:*      `{$paymentDate->format('M j, Y h:i A')}`",
-            "🔖 *Trx ID:*    `{$trxId}`",
-            "✅ *APV:*       `{$apv}`",
-            "━━━━━━━━━━━━━━━━━━",
-            "✅ Payment confirmed",
-        ]);
+            "🏦 *Bank:*      `{$bank}`",
+            "📍 *Location:*  `{$location}`",
+        ];
 
-        $this->telegram->sendMarkdown($telegramChatId, $message);
+        if ($accountType) {
+            $lines[] = "🏷️ *Account:*   `{$accountType}`";
+        }
+
+        $lines[] = "📅 *Date:*      `{$paymentDate->format('M j, Y h:i A')}`";
+        $lines[] = "🔖 *Order Ref:* `{$orderRef}`";
+        $lines[] = "━━━━━━━━━━━━━━━━━━";
+        $lines[] = "✅ Payment confirmed";
+
+        $this->telegram->sendMarkdown($telegramChatId, implode("\n", $lines));
     }
 
     // -------------------------------------------------------------------------
@@ -315,7 +267,7 @@ class AbaPaymentService
             ->first();
 
         if (! $group) {
-            Log::notice('AbaPaymentService: no connected group for chat', [
+            Log::notice('ChipMongPaymentService: no connected group for chat', [
                 'chat_id' => $chatId,
             ]);
         }
@@ -327,52 +279,23 @@ class AbaPaymentService
     {
         $text = trim($text);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Remove Telegram copied message header
-        |--------------------------------------------------------------------------
-        | Example:
-        | PayWay by ABA, [28 Jun 2026 at 6:11:12 in the evening]:
-        */
         $text = preg_replace('/^.+?,\s*\[.*?\]:\s*/us', '', $text);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Remove Telegram username prefix
-        |--------------------------------------------------------------------------
-        | Example:
-        | @PayWayBot ៛4,000 paid by ...
-        */
         $text = preg_replace('/^@\S+\s+/u', '', $text);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Remove bracket prefix
-        |--------------------------------------------------------------------------
-        | Example:
-        | [PayWay by ABA]: ៛4,000 paid by ...
-        */
         $text = preg_replace('/^\[.*?\]:\s*/us', '', $text);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Remove leading dots
-        |--------------------------------------------------------------------------
-        */
         $text = preg_replace('/^\.{3}\s*/u', '', $text);
 
         return trim($text);
     }
 
-    private function detectCurrency(string $symbol): string
+    private function detectCurrency(string $code): string
     {
-        $symbol = trim($symbol);
+        $code = trim($code);
 
-        $currency = self::CURRENCY_MAP[$symbol] ?? null;
+        $currency = self::CURRENCY_MAP[$code] ?? null;
 
         if ($currency === null) {
-            Log::warning('AbaPaymentService: unknown currency symbol', [
-                'symbol' => $symbol,
+            Log::warning('ChipMongPaymentService: unknown currency code', [
+                'code' => $code,
             ]);
 
             return 'KHR';
@@ -386,18 +309,9 @@ class AbaPaymentService
         $raw = preg_replace('/\s+/', ' ', trim($raw));
 
         try {
-            $parsed = Carbon::createFromFormat('M j, g:i A', $raw);
-            $now = now();
-
-            $candidate = $parsed->year($now->year);
-
-            if ($candidate->isAfter($now)) {
-                $candidate->subYear();
-            }
-
-            return $candidate;
+            return Carbon::createFromFormat('M j, Y h:i A', $raw);
         } catch (\Throwable $e) {
-            Log::warning('ABA date parse with format failed', [
+            Log::warning('ChipMong date parse with format failed', [
                 'raw' => $raw,
                 'error' => $e->getMessage(),
             ]);
@@ -406,7 +320,7 @@ class AbaPaymentService
         try {
             return Carbon::parse($raw);
         } catch (\Throwable $e) {
-            Log::warning('ABA date parse fallback failed', [
+            Log::warning('ChipMong date parse fallback failed', [
                 'raw' => $raw,
                 'error' => $e->getMessage(),
             ]);

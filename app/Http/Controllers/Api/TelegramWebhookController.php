@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\Telegram\PackageHandler;
 use App\Http\Controllers\Api\Telegram\SupportHandler;
 use App\Http\Controllers\Controller;
 use App\Services\AbaPaymentService;
+use App\Services\ChipMongPaymentService;
 use App\Services\TelegramBotService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -22,6 +23,7 @@ class TelegramWebhookController extends Controller
     public function __construct(
         protected TelegramBotService $telegram,
         protected AbaPaymentService $aba,
+        protected ChipMongPaymentService $acleda,
         protected CallbackHandler $callbackHandler,
         protected AccountHandler $accountHandler,
         protected GroupHandler $groupHandler,
@@ -74,11 +76,34 @@ class TelegramWebhookController extends Controller
         |--------------------------------------------------------------------------
         | ABA Payment Message
         |--------------------------------------------------------------------------
-        | Important:
+        | Important:x
         | This must be before ignoring bot messages because PayWay by ABA is a bot.
         */
         if ($this->isAbaPaymentMessage($text)) {
             $result = $this->aba->process($text, $chatId);
+
+            return response()->json([
+                'ok' => true,
+                'parsed' => $result['parsed'],
+                'is_duplicate' => $result['is_duplicate'],
+                'currency' => $result['currency'],
+                'found_group' => (bool) $result['group'],
+                'payment_count' => $result['count'] ?? 0,
+                'success_count' => $result['success_count'] ?? 0,
+                'duplicate_count' => $result['duplicate_count'] ?? 0,
+                'payment_id' => $result['payment']?->telegram_paymentID,
+            ]);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Chip Mong / KHQR Payment Message
+        |--------------------------------------------------------------------------
+        | The paying bank varies per transaction (ACLEDA Bank Plc., ABA Bank, etc.),
+        | so detection is keyed on the message format, not a specific bank name.
+        */
+        if ($this->isChipMongPaymentMessage($text)) {
+            $result = $this->acleda->process($text, $chatId);
 
             return response()->json([
                 'ok' => true,
@@ -155,6 +180,12 @@ class TelegramWebhookController extends Controller
         return str_contains($text, 'paid by')
             && str_contains($text, 'Trx. ID')
             && str_contains($text, 'APV:');
+    }
+
+    private function isChipMongPaymentMessage(string $text): bool
+    {
+        return str_contains($text, 'is paid by')
+            && str_contains($text, 'via KHQR for purchase');
     }
 
     private function reply(string $chatId, string $text): JsonResponse

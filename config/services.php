@@ -42,5 +42,21 @@ return [
         'support_username' => env('TELEGRAM_SUPPORT_USERNAME'),
         'support_phone'    => env('TELEGRAM_SUPPORT_PHONE'),
         'support_hours'    => env('TELEGRAM_SUPPORT_HOURS', 'Mon-Fri 8:00 - 17:00'),
-],
+    ],
+    'bakong_gateway' => [
+        'url' => env('BAKONG_GATEWAY_URL'),
+        'api_key' => env('BAKONG_GATEWAY_API_KEY'),
+        'token' => env('BAKONG_GATEWAY_TOKEN'),
+    ],
+
+    'bakong' => [
+        'account_id' => env('BAKONG_ACCOUNT_ID'),
+        'merchant_id' => env('BAKONG_MERCHANT_ID'),
+        'acquiring_bank' => env('BAKONG_ACQUIRING_BANK'),
+        'merchant_name' => env('BAKONG_MERCHANT_NAME', 'CHEN KHEANG'),
+        'merchant_city' => env('BAKONG_MERCHANT_CITY', 'Phnom Penh'),
+    ],
+    'frontend' => [
+        'url' => env('FRONTEND_URL', 'http://localhost:3000'),
+    ],
 ];
