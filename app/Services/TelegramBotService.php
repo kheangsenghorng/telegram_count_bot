@@ -404,4 +404,111 @@ class TelegramBotService
 
         return $response->json() ?? false;
     }
+
+    public function sendPhoto(
+        string $chatId,
+        string $photo,
+        ?string $caption = null,
+        array $extra = []
+    ): array {
+        $payload = array_merge([
+            'chat_id' => $chatId,
+            'photo' => $photo,
+        ], $extra);
+    
+        if ($caption) {
+            $payload['caption'] = $caption;
+            $payload['parse_mode'] = 'Markdown';
+        }
+    
+        return $this->request('sendPhoto', $payload);
+    }
+    
+    public function sendPhotoUpload(
+        string $chatId,
+        string $filePath,
+        ?string $caption = null,
+        array $extra = []
+    ): array {
+        if (! file_exists($filePath)) {
+            return [
+                'ok' => false,
+                'description' => 'Photo file does not exist: ' . $filePath,
+            ];
+        }
+    
+        $payload = array_merge([
+            'chat_id' => $chatId,
+            'photo' => new \CURLFile($filePath),
+        ], $extra);
+    
+        if ($caption) {
+            $payload['caption'] = $caption;
+            $payload['parse_mode'] = 'Markdown';
+        }
+    
+        return $this->requestMultipart('sendPhoto', $payload);
+    }
+    
+    public function sendDocumentUpload(
+        string $chatId,
+        string $filePath,
+        ?string $caption = null,
+        array $extra = []
+    ): array {
+        if (! file_exists($filePath)) {
+            return [
+                'ok' => false,
+                'description' => 'Document file does not exist: ' . $filePath,
+            ];
+        }
+    
+        $payload = array_merge([
+            'chat_id' => $chatId,
+            'document' => new \CURLFile($filePath),
+        ], $extra);
+    
+        if ($caption) {
+            $payload['caption'] = $caption;
+            $payload['parse_mode'] = 'Markdown';
+        }
+    
+        return $this->requestMultipart('sendDocument', $payload);
+    }
+    
+    private function requestMultipart(string $method, array $payload): array
+    {
+        /**
+         * Change this if your Telegram token config key is different.
+         */
+        $token = config('services.telegram.bot_token');
+    
+        $url = "https://api.telegram.org/bot{$token}/{$method}";
+    
+        $ch = curl_init();
+    
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POSTFIELDS => $payload,
+        ]);
+    
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+    
+        curl_close($ch);
+    
+        if ($error) {
+            return [
+                'ok' => false,
+                'description' => $error,
+            ];
+        }
+    
+        return json_decode((string) $response, true) ?: [
+            'ok' => false,
+            'raw' => $response,
+        ];
+    }
 }
