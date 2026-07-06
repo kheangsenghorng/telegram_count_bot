@@ -100,4 +100,13 @@ class KhmerDateFormatter
     {
         return self::MONTHS[$month] ?? '';
     }
+    // ── Month name → number: កក្កដា → 7 ─────────────────────────────────────
+public static function monthNumber(string $name): ?int
+{
+    $name = trim($name);
+
+    $number = array_search($name, self::MONTHS, true);
+
+    return $number === false ? null : $number;
+}
 }

@@ -8,8 +8,8 @@ use App\Models\TelegramGroup;
 use App\Models\TelegramPayment;
 use App\Models\UserSubscription;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ChipMongPaymentService
 {
@@ -24,56 +24,69 @@ class ChipMongPaymentService
     /**
      * Supports:
      *
-     * ACLEDA to Chip Mong Pay KHR 6,500 is paid by ACLEDA Bank Plc. via KHQR for purchase 540abedd. From Keo Sorany, at CHEN KHEANG, date Jul 01, 2026 11:30 AM
+     * KHR 16,000 is paid by ABA Bank via KHQR for purchase 4a335f70.
+     * From MOUYLEANG MOUERN, at CHEN KHEANG, date Jul 06, 2026 10:08 AM
      *
-     * KHR 19,000 is paid by ACLEDA Bank Plc. via KHQR for purchase 81fda03b. From Oum Socheata, at CHEN KHEANG, date Jun 29, 2026 07:28 PM
+     * USD 2.50 is paid by ABA Bank via KHQR for purchase 44462a1b.
+     * From KAO HENG, at CHEN KHEANG, date Jul 06, 2026 03:21 PM
      *
-     * KHR 6,500 is paid by ACLEDA Bank Plc. via KHQR for purchase 540abedd. From Keo Sorany, at CHEN KHEANG, Merchant account, date Jul 1, 2026 11:30 AM
-     */
-    private const PATTERN = '/
-        (?:ACLEDA\s+to\s+(?P<merchant>.+?)\s+)?
-        (?P<currency_code>KHR|USD|[៛\$＄])
-        \s*
-        (?P<amount>[\d,]+(?:\.\d+)?)
-        \s+is\s+paid\s+by\s+
-        (?P<bank>.+?)
-        \s+via\s+KHQR\s+for\s+purchase\s+
-        (?P<order_ref>[A-Za-z0-9]+)
-        \.\s+From\s+
-        (?P<payer_name>.+?)
-        ,\s+at\s+
-        (?P<location>.+?)
-        (?:,\s+(?P<account_type>.+?))?
-        ,\s+date\s+
-        (?P<date>[A-Za-z]+\s+\d{1,2},\s*\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))
-    /uix';
+     * KHR 4,000 is paid by Wing Bank (Cambodia) Plc via KHQR for purchase b5dfdee8.
+     * From Chamroeun Ruos, at CHEN KHEANG, date Jul 06, 2026 04:08 PM
+     *
+     * ACLEDA to Chip Mong Pay KHR 6,500 is paid by ACLEDA Bank Plc. via KHQR...
+     */private const PATTERN = '/
+    (?:ACLEDA\s+to\s+(?P<merchant_prefix>.+?)\s+)?
+
+    (?P<currency_code>KHR|USD|[៛\$＄])
+    \s*
+    (?P<amount>[\d,]+(?:\.\d+)?)
+
+    \s+is\s+paid\s+by\s+
+    (?P<bank>.+?)
+
+    \s+via\s+KHQR\s+for\s+purchase\s+
+    (?P<order_ref>[A-Za-z0-9]+)
+
+    \.\s+From\s+
+    (?P<payer_name>.+?)
+
+    ,\s+at\s+
+    (?P<location>.*?)
+
+    (?:,\s+(?P<account_type>
+        Merchant\s+account|
+        Saving\s+account|
+        Current\s+account
+    ))?
+
+    ,\s+date\s+
+    (?P<date>
+        [A-Za-z]+\s+\d{1,2},\s*
+        \d{4}\s+
+        \d{1,2}:\d{2}\s*
+        (?:AM|PM)
+    )
+/uix';
 
     public function __construct(
         protected TelegramBotService $telegram
     ) {}
 
-    // -------------------------------------------------------------------------
-    // Main entry point
-    // -------------------------------------------------------------------------
-
-    public function process(string $rawText, string $telegramChatId): array
+    public function process(string $rawText, string|int $telegramChatId): array
     {
+        $telegramChatId = (string) $telegramChatId;
+        $cleanText = $this->cleanText($rawText);
+
         $group = $this->findGroup($telegramChatId);
 
         $userId = $group?->user_id;
         $subscriptionId = $group?->subscription_id;
         $telegramGroupId = $group?->telegramGroupsID;
 
-        $cleanText = $this->cleanText($rawText);
-
         preg_match_all(self::PATTERN, $cleanText, $matches, PREG_SET_ORDER);
 
-        // ---------------------------------------------------------------------
-        // Parse failed
-        // ---------------------------------------------------------------------
-
         if (empty($matches)) {
-            Log::warning('ChipMong (ACLEDA) parse failed', [
+            Log::warning('Chip Mong payment parse failed', [
                 'chat_id' => $telegramChatId,
                 'original' => $rawText,
                 'clean' => $cleanText,
@@ -93,7 +106,7 @@ class ChipMongPaymentService
             if ($group) {
                 $this->telegram->sendMarkdown(
                     $telegramChatId,
-                    "⚠️ *ACLEDA/Chip Mong Payment Received — Parse Failed*\n\n"
+                    "⚠️ *Chip Mong Payment Received — Parse Failed*\n\n"
                     . "Could not read the message automatically.\n"
                     . "Raw text saved for manual review.\n\n"
                     . "```\n{$cleanText}\n```"
@@ -113,25 +126,28 @@ class ChipMongPaymentService
             ];
         }
 
-        // ---------------------------------------------------------------------
-        // Parse success: save all payments
-        // ---------------------------------------------------------------------
-
         $savedPayments = [];
         $duplicateCount = 0;
         $successCount = 0;
 
         foreach ($matches as $match) {
             $currency = $this->detectCurrency($match['currency_code'] ?? '');
-            $paymentDate = $this->parseDate($match['date']);
-            $orderRef = trim($match['order_ref']);
+            $paymentDate = $this->parseDate($match['date'] ?? '');
+            $orderRef = trim($match['order_ref'] ?? '');
 
-            $amount = (float) str_replace(',', '', $match['amount']);
-            $payerName = trim($match['payer_name']);
-            $bank = trim($match['bank']);
-            $merchant = ! empty($match['merchant']) ? trim($match['merchant']) : 'Chip Mong Pay';
-            $location = trim($match['location']);
-            $accountType = ! empty($match['account_type']) ? trim($match['account_type']) : null;
+            $amount = (float) str_replace(',', '', $match['amount'] ?? '0');
+            $payerName = trim($match['payer_name'] ?? '');
+            $bank = trim($match['bank'] ?? '');
+            $merchant = ! empty($match['merchant_prefix'])
+                ? trim($match['merchant_prefix'])
+                : 'Chip Mong Pay';
+
+            $location = trim($match['location'] ?? '');
+            $accountType = ! empty($match['account_type'])
+                ? trim($match['account_type'])
+                : null;
+
+            $paymentMethod = $this->normalizePaymentMethod($bank);
 
             $payment = TelegramPayment::updateOrCreate(
                 [
@@ -147,7 +163,7 @@ class ChipMongPaymentService
                     'payer_name' => $payerName,
                     'payer_account' => $accountType,
                     'merchant_name' => $merchant,
-                    'payment_method' => 'ACLEDA KHQR',
+                    'payment_method' => $paymentMethod,
                     'bank_code' => $bank,
                     'trx_id' => $orderRef,
                     'apv' => null,
@@ -188,6 +204,7 @@ class ChipMongPaymentService
                         accountType: $accountType,
                         paymentDate: $paymentDate,
                         orderRef: $orderRef,
+                        paymentMethod: $paymentMethod,
                     );
                 }
             }
@@ -212,10 +229,6 @@ class ChipMongPaymentService
         ];
     }
 
-    // -------------------------------------------------------------------------
-    // Alert formatter
-    // -------------------------------------------------------------------------
-
     private function sendPaymentAlert(
         string $telegramChatId,
         float $amount,
@@ -227,6 +240,7 @@ class ChipMongPaymentService
         ?string $accountType,
         Carbon $paymentDate,
         string $orderRef,
+        string $paymentMethod,
     ): void {
         $symbol = $currency === 'KHR' ? '៛' : '$';
         $decimals = $currency === 'KHR' ? 0 : 2;
@@ -234,12 +248,13 @@ class ChipMongPaymentService
         $formattedAmount = number_format($amount, $decimals);
 
         $lines = [
-            "💳 *Chip Mong Payment Received (ACLEDA)*",
+            "💳 *Chip Mong Bank Payment Received*",
             "━━━━━━━━━━━━━━━━━━",
             "💰 *Amount:*    `{$symbol}{$formattedAmount}`",
             "👤 *Payer:*     `{$payerName}`",
             "🏪 *Merchant:*  `{$merchant}`",
             "🏦 *Bank:*      `{$bank}`",
+            "💳 *Method:*    `{$paymentMethod}`",
             "📍 *Location:*  `{$location}`",
         ];
 
@@ -254,10 +269,6 @@ class ChipMongPaymentService
 
         $this->telegram->sendMarkdown($telegramChatId, implode("\n", $lines));
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     private function findGroup(string $chatId): ?TelegramGroup
     {
@@ -279,10 +290,13 @@ class ChipMongPaymentService
     {
         $text = trim($text);
 
-        $text = preg_replace('/^.+?,\s*\[.*?\]:\s*/us', '', $text);
-        $text = preg_replace('/^@\S+\s+/u', '', $text);
-        $text = preg_replace('/^\[.*?\]:\s*/us', '', $text);
-        $text = preg_replace('/^\.{3}\s*/u', '', $text);
+        // Remove Telegram exported header:
+        // Chip Mong Bank Payment, [6 Jul 2026 at 10:08:55 in the morning]:
+        $text = preg_replace('/^.+?,\s*\[.*?\]:\s*/um', '', $text);
+
+        $text = preg_replace('/^@\S+\s+/um', '', $text);
+        $text = preg_replace('/^\[.*?\]:\s*/um', '', $text);
+        $text = preg_replace('/^\.{3}\s*/um', '', $text);
 
         return trim($text);
     }
@@ -302,6 +316,17 @@ class ChipMongPaymentService
         }
 
         return $currency;
+    }
+
+    private function normalizePaymentMethod(string $bank): string
+    {
+        $bank = trim($bank);
+
+        if ($bank === '') {
+            return 'KHQR';
+        }
+
+        return "{$bank} KHQR";
     }
 
     private function parseDate(string $raw): Carbon

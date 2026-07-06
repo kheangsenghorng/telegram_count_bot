@@ -8,6 +8,8 @@ use App\Telegram\AbaTelegramHandler;
 use danog\MadelineProto\Settings;
 use danog\MadelineProto\Settings\AppInfo;
 use Illuminate\Console\Command;
+use danog\MadelineProto\Logger;
+use danog\MadelineProto\Settings\Logger as LoggerSettings;
 
 class ListenAbaTelegram extends Command
 {
@@ -35,7 +37,7 @@ class ListenAbaTelegram extends Command
             return self::FAILURE;
         }
 
-        // FIX #1: create session directory BEFORE building settings,
+        // Create session directory BEFORE building settings,
         // in case MadelineProto tries to write to it during setup
         $sessionPath = storage_path('app/madeline');
         if (! is_dir($sessionPath)) {
@@ -52,10 +54,19 @@ class ListenAbaTelegram extends Command
         $settings = new Settings();
         $settings->setAppInfo($appInfo);
 
+        // Quiet MadelineProto's internal MTProto logging — errors only, to file.
+        // Your handler's own echo/Log lines are unaffected.
+        $logger = new LoggerSettings();
+        $logger->setType(Logger::FILE_LOGGER);
+        $logger->setExtra(storage_path('logs/madeline.log'));
+        $logger->setLevel(Logger::LEVEL_ERROR);
+        
+        $settings->setLogger($logger);
+
         $this->info('  ✅ Starting event loop — press Ctrl+C to stop.');
         $this->info('');
 
-        // FIX #2: wrap in try/catch — startAndLoop() runs forever and any
+        // Wrap in try/catch — startAndLoop() runs forever and any
         // uncaught exception would otherwise kill the process silently
         try {
             AbaTelegramHandler::startAndLoop(

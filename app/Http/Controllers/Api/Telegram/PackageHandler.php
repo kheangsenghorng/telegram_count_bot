@@ -79,13 +79,13 @@ class PackageHandler
             return response()->json(['ok' => true]);
         }
 
+        // Atomic lock — Cache::add returns false if the key already exists,
+        // so a double-tap can never slip through the has()/put() race window.
         $lockKey = "pkg_show_{$chatId}";
 
-        if (Cache::has($lockKey)) {
+        if (! Cache::add($lockKey, true, now()->addSeconds(3))) {
             return response()->json(['ok' => true]);
         }
-
-        Cache::put($lockKey, true, now()->addSeconds(3));
 
         $packages = Package::query()
             ->orderBy('price')
@@ -143,9 +143,9 @@ class PackageHandler
             $num = $i + 1;
 
             $status = $pkg->status === 'active' ? '✅' : '🔴';
-            $name = $this->escapeMarkdown($pkg->name);
-            $price = $this->formatPrice($pkg->price);
-            $cycle = $this->cycleLabel($pkg->billing_cycle);
+            $name   = $this->escapeMarkdown($pkg->name);
+            $price  = $this->formatPrice($pkg->price);
+            $cycle  = $this->cycleLabel($pkg->billing_cycle);
 
             $groups = method_exists($pkg, 'isUnlimitedGroups') && $pkg->isUnlimitedGroups()
                 ? '∞'
@@ -187,7 +187,7 @@ class PackageHandler
                     'inline_keyboard' => [
                         [
                             [
-                                'text' => "🛒 ទិញ {$pkg->name}",
+                                'text'          => "🛒 ទិញ {$pkg->name}",
                                 'callback_data' => 'pkg_buy_' . $pkg->packagesID,
                             ],
                         ],
@@ -196,10 +196,14 @@ class PackageHandler
             }
 
             $this->telegram->sendMessage($chatId, $text, $extra);
+
+            // Gentle pacing — avoids tripping Telegram's per-chat rate limit
+            // when the package list grows.
+            usleep(50_000);
         }
 
         $supportRaw = (string) config('services.telegram.support_username');
-        $support = $this->escapeMarkdown($supportRaw);
+        $support    = $this->escapeMarkdown($supportRaw);
 
         if ($supportRaw !== '') {
             $this->telegram->sendMessage(
@@ -231,13 +235,12 @@ class PackageHandler
             return;
         }
 
+        // Atomic lock — see showPackages()
         $lockKey = "pkg_buy_{$chatId}_{$packageId}";
 
-        if (Cache::has($lockKey)) {
+        if (! Cache::add($lockKey, true, now()->addSeconds(5))) {
             return;
         }
-
-        Cache::put($lockKey, true, now()->addSeconds(5));
 
         $package = Package::where('packagesID', $packageId)->first();
 
@@ -261,12 +264,19 @@ class PackageHandler
             return;
         }
 
+        // Show "typing…" while Bakong creates the checkout (can take a moment)
+        $this->telegram->sendChatAction($chatId);
+
         try {
             $payment = $this->payments->createCheckout(
                 package: $package,
                 telegramUserId: (int) $chatId,
                 requestedBy: $requestedBy,
             );
+            $payment->forceFill([
+                'telegram_chat_id'    => (string) $chatId,
+                'telegram_message_id' => $messageId,
+            ])->save();
 
             $payUrl = $this->payments->checkoutUrl($payment);
 
@@ -281,10 +291,10 @@ class PackageHandler
             }
         } catch (Throwable $e) {
             Log::error('Bakong checkout failed', [
-                'package_id' => $packageId,
-                'chat_id' => $chatId,
+                'package_id'   => $packageId,
+                'chat_id'      => $chatId,
                 'requested_by' => $requestedBy,
-                'error' => $e->getMessage(),
+                'error'        => $e->getMessage(),
             ]);
 
             $this->telegram->editMessage(
@@ -301,7 +311,7 @@ class PackageHandler
 
         $supportRaw = (string) config('services.telegram.support_username');
 
-        $name = $this->escapeMarkdown($package->name);
+        $name  = $this->escapeMarkdown($package->name);
         $buyer = $this->escapeMarkdown($requestedBy);
         $price = $this->formatPrice($package->price);
         $cycle = $this->cycleLabel($package->billing_cycle);

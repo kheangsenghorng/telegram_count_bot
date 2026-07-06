@@ -24,10 +24,6 @@ use Illuminate\Support\Str;
  *   3. activatePackage()            ← carry-over quota logic
  *   4. buildActivationMessage()     ← Khmer receipt
  *   5. TelegramBotService::sendMessage()
- *
- * NOTE: $checkout is the model created by BakongService::createCheckout().
- * If your model/columns are named differently, adjust ONLY the parts
- * marked with // ← ADJUST.
  */
 class PaymentConfirmationService
 {
@@ -126,6 +122,9 @@ class PaymentConfirmationService
      *   Old plan:  effective limit 1500, payment_used 1400 → remaining 100
      *   New plan:  payment_limit 4000
      *   Result:    override_payment_limit = 4000 + 100 = 4100
+     *
+     * The new row starts with renewal_reminded_at = NULL,
+     * so the renewal-reminder cycle restarts automatically.
      */
     protected function activatePackage(object $payment, Package $package, string $userUuid): UserSubscription
     {
@@ -133,12 +132,13 @@ class PaymentConfirmationService
             ?? $payment->external_transaction_id
             ?? $payment->getKey()); // ← ADJUST to your unique transaction column
 
-        return DB::transaction(function () use ($payment, $package, $userUuid, $transactionId) {
+        return DB::transaction(function () use ($package, $userUuid, $transactionId) {
 
             // 1. Idempotency — same transaction never activates twice
             //    (the polling job fires every 5 seconds).
             $existing = UserSubscription::query()
                 ->where('transaction_id', $transactionId)
+                ->lockForUpdate()
                 ->first();
 
             if ($existing) {
@@ -150,31 +150,22 @@ class PaymentConfirmationService
                 return $existing;
             }
 
-            // 2. Current active subscription for the SAME user
+            // 2. Current active subscription for the SAME user (locked)
             $current = UserSubscription::query()
-                ->where('user_id', $userUuid)
-                ->where('status', 'active')
-                ->where(function ($q) {
-                    $q->whereNull('ends_at')
-                        ->orWhere('ends_at', '>', now());
-                })
+                ->with('package')
+                ->forUser($userUuid)
+                ->active()
                 ->latest('starts_at')
                 ->lockForUpdate()
                 ->first();
 
-            // 3. Carry-over
+            // 3. Carry-over — compute BEFORE closing the old subscription
             $carryOver = 0;
             $groupUsed = 0;
 
             if ($current) {
-                $oldLimit = $current->effectivePaymentLimit();
-
-                if ($oldLimit !== null) {
-                    $carryOver = max(0, $oldLimit - $current->payment_used);
-                }
-
-                // User's registered groups still exist after upgrade
-                $groupUsed = (int) $current->group_used;
+                $carryOver = $current->carryOverPayments();
+                $groupUsed = $current->carryOverGroupsUsed();
             }
 
             $overridePaymentLimit = null;
@@ -193,12 +184,15 @@ class PaymentConfirmationService
                 default    => $now->copy()->addMonth(),
             };
 
-            // 5. Retire the old subscription
+            // 5. Retire the old subscription so it stops matching
+            //    activeFor() and the renewal-reminder query
             if ($current) {
-                $current->update(['status' => 'cancelled']);
+                $current->update(['status' => 'replaced']);
             }
 
-            // 6. Create the new subscription with carried-over quota
+            // 6. Create the new subscription with carried-over quota.
+            //    renewal_reminded_at is NULL on the new row → the customer
+            //    will get one fresh reminder before the new ends_at.
             $subscription = UserSubscription::create([
                 'user_id'                => $userUuid,
                 'package_id'             => $package->packagesID,

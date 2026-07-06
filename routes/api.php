@@ -1,6 +1,5 @@
 <?php
 
-use App\Jobs\SendStatsSummaryJob;
 use Illuminate\Support\Facades\Route;
 
 require __DIR__.'/api/public.php';

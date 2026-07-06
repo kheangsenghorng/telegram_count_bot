@@ -6,11 +6,16 @@ namespace App\Services;
 
 use App\Constants\BotCallback;
 use Carbon\Carbon;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class TelegramBotService
 {
+    private const TIMEOUT_SECONDS = 15;
+
+    private const UPLOAD_TIMEOUT_SECONDS = 60;
+
     private function token(): ?string
     {
         return config('services.telegram.bot_token');
@@ -22,63 +27,130 @@ class TelegramBotService
     }
 
     // -------------------------------------------------------------------------
+    // Core HTTP — EVERY Telegram API call goes through here
+    // -------------------------------------------------------------------------
+
+    private function request(string $method, array $payload, bool $retried = false): array
+    {
+        try {
+            $response = Http::timeout(self::TIMEOUT_SECONDS)
+                ->connectTimeout(5)
+                ->post($this->apiUrl($method), $payload);
+        } catch (ConnectionException $e) {
+            Log::error('Telegram connection failed', [
+                'method' => $method,
+                'error'  => $e->getMessage(),
+            ]);
+
+            return [
+                'ok'          => false,
+                'description' => 'Connection failed: ' . $e->getMessage(),
+            ];
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json)) {
+            Log::error('Telegram returned non-JSON response', [
+                'method' => $method,
+                'status' => $response->status(),
+                'body'   => substr($response->body(), 0, 500),
+            ]);
+
+            return [
+                'ok'          => false,
+                'description' => 'Invalid response from Telegram',
+            ];
+        }
+
+        // 429 Too Many Requests → wait as Telegram instructs, retry once
+        if (($json['error_code'] ?? 0) === 429 && ! $retried) {
+            $wait = min((int) ($json['parameters']['retry_after'] ?? 1), 5);
+
+            sleep($wait);
+
+            return $this->request($method, $payload, retried: true);
+        }
+
+        if (($json['ok'] ?? false) !== true) {
+            Log::warning('Telegram API error', [
+                'method'      => $method,
+                'chat_id'     => $payload['chat_id'] ?? null,
+                'error_code'  => $json['error_code'] ?? null,
+                'description' => $json['description'] ?? null,
+            ]);
+        }
+
+        return $json;
+    }
+
+    // -------------------------------------------------------------------------
     // Sending
     // -------------------------------------------------------------------------
 
-    public function sendMessage(string|int $chatId, string $text, array $options = []): bool|array
+    public function sendMessage(string|int $chatId, string $text, array $options = []): array
     {
         $payload = array_merge([
             'chat_id' => $chatId,
             'text'    => $text,
         ], $options);
 
-        $response = Http::post($this->apiUrl('sendMessage'), $payload);
+        $result = $this->request('sendMessage', $payload);
 
-        if (! $response->successful()) {
-            Log::error('Telegram sendMessage failed', [
-                'status'  => $response->status(),
-                'body'    => $response->body(),
-                'payload' => $payload,
+        // Fallback: if Markdown failed to parse (e.g. "_" in a username),
+        // resend as plain text instead of silently dropping the message.
+        if (
+            ($result['ok'] ?? false) === false
+            && isset($payload['parse_mode'])
+            && str_contains((string) ($result['description'] ?? ''), "can't parse entities")
+        ) {
+            Log::notice('Telegram parse_mode fallback → plain text', [
+                'chat_id' => $chatId,
             ]);
+
+            unset($payload['parse_mode']);
+
+            $result = $this->request('sendMessage', $payload);
         }
 
-        return $response->json() ?? false;
+        return $result;
     }
 
-    public function sendMarkdown(string|int $chatId, string $text, array $options = []): bool|array
+    public function sendMarkdown(string|int $chatId, string $text, array $options = []): array
     {
         return $this->sendMessage($chatId, $text, array_merge([
             'parse_mode' => 'Markdown',
         ], $options));
     }
 
-    public function sendHtml(string|int $chatId, string $text, array $options = []): bool|array
+    public function sendHtml(string|int $chatId, string $text, array $options = []): array
     {
         return $this->sendMessage($chatId, $text, array_merge([
             'parse_mode' => 'HTML',
         ], $options));
     }
 
-    public function deleteMessage(string|int $chatId, int $messageId): bool|array
+    /**
+     * Show "typing…" / "upload_photo…" indicator while doing slow work
+     * (e.g. creating a Bakong checkout or generating a QR image).
+     */
+    public function sendChatAction(string|int $chatId, string $action = 'typing'): array
     {
-        $response = Http::post($this->apiUrl('deleteMessage'), [
+        return $this->request('sendChatAction', [
+            'chat_id' => $chatId,
+            'action'  => $action,
+        ]);
+    }
+
+    public function deleteMessage(string|int $chatId, int $messageId): array
+    {
+        return $this->request('deleteMessage', [
             'chat_id'    => $chatId,
             'message_id' => $messageId,
         ]);
-
-        if (! $response->successful()) {
-            Log::warning('Telegram deleteMessage failed', [
-                'status'     => $response->status(),
-                'body'       => $response->body(),
-                'chat_id'    => $chatId,
-                'message_id' => $messageId,
-            ]);
-        }
-
-        return $response->json() ?? false;
     }
 
-    public function sendMainMenu(string|int $chatId, string $text): bool|array
+    public function sendMainMenu(string|int $chatId, string $text): array
     {
         return $this->sendMessage($chatId, $text, [
             'reply_markup' => [
@@ -109,32 +181,28 @@ class TelegramBotService
 
     public function sendStatsMenu(string|int $chatId): array
     {
-        $response = Http::post($this->apiUrl('sendMessage'), [
+        return $this->request('sendMessage', [
             'chat_id'      => $chatId,
             'text'         => "📊 *ស្ថិតិការទូទាត់*\nជ្រើសរយៈពេលដើម្បីមើល៖",
             'parse_mode'   => 'Markdown',
             'reply_markup' => json_encode($this->mainStatsKeyboard()),
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function editToStatsMenu(string|int $chatId, int $messageId, string $text): array
     {
-        $response = Http::post($this->apiUrl('editMessageText'), [
+        return $this->request('editMessageText', [
             'chat_id'      => $chatId,
             'message_id'   => $messageId,
             'text'         => $text,
             'parse_mode'   => 'Markdown',
             'reply_markup' => json_encode($this->mainStatsKeyboard()),
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function editToWeekMenu(string|int $chatId, int $messageId): array
     {
-        $now = Carbon::now();
+        $now        = Carbon::now();
         $monthStart = $now->copy()->startOfMonth();
 
         $weekButtons = [];
@@ -162,10 +230,10 @@ class TelegramBotService
             ];
         }
 
-        $rows = array_chunk($weekButtons, 2);
+        $rows   = array_chunk($weekButtons, 2);
         $rows[] = $this->backButton();
 
-        $response = Http::post($this->apiUrl('editMessageText'), [
+        return $this->request('editMessageText', [
             'chat_id'      => $chatId,
             'message_id'   => $messageId,
             'text'         => "📆 *ជ្រើសសប្ដាហ៍ — " . $now->format('F Y') . "*",
@@ -174,8 +242,6 @@ class TelegramBotService
                 'inline_keyboard' => $rows,
             ]),
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function editToMonthMenu(string|int $chatId, int $messageId, array $monthsWithData): array
@@ -201,10 +267,10 @@ class TelegramBotService
             ];
         }
 
-        $rows = array_chunk($monthButtons, 3);
+        $rows   = array_chunk($monthButtons, 3);
         $rows[] = $this->backButton();
 
-        $response = Http::post($this->apiUrl('editMessageText'), [
+        return $this->request('editMessageText', [
             'chat_id'      => $chatId,
             'message_id'   => $messageId,
             'text'         => "🗓 *ជ្រើសខែ — " . $now->format('Y') . "*",
@@ -213,8 +279,6 @@ class TelegramBotService
                 'inline_keyboard' => $rows,
             ]),
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function editToYearMenu(string|int $chatId, int $messageId, array $yearsWithData): array
@@ -228,10 +292,10 @@ class TelegramBotService
             ];
         }
 
-        $rows = array_chunk($yearButtons, 3);
+        $rows   = array_chunk($yearButtons, 3);
         $rows[] = $this->backButton();
 
-        $response = Http::post($this->apiUrl('editMessageText'), [
+        return $this->request('editMessageText', [
             'chat_id'      => $chatId,
             'message_id'   => $messageId,
             'text'         => "📊 *ជ្រើសឆ្នាំ*",
@@ -240,8 +304,6 @@ class TelegramBotService
                 'inline_keyboard' => $rows,
             ]),
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function editMessage(
@@ -257,25 +319,11 @@ class TelegramBotService
             'parse_mode' => 'Markdown',
         ];
 
-        if (! empty($inlineKeyboard)) {
-            $payload['reply_markup'] = json_encode([
-                'inline_keyboard' => $inlineKeyboard,
-            ]);
-        } else {
-            $payload['reply_markup'] = json_encode($this->mainStatsKeyboard());
-        }
+        $payload['reply_markup'] = ! empty($inlineKeyboard)
+            ? json_encode(['inline_keyboard' => $inlineKeyboard])
+            : json_encode($this->mainStatsKeyboard());
 
-        $response = Http::post($this->apiUrl('editMessageText'), $payload);
-
-        if (! $response->successful()) {
-            Log::warning('Telegram editMessage failed', [
-                'status'  => $response->status(),
-                'body'    => $response->body(),
-                'payload' => $payload,
-            ]);
-        }
-
-        return $response->json() ?? [];
+        return $this->request('editMessageText', $payload);
     }
 
     public function answerCallbackQuery(string $callbackQueryId, string $text = ''): array
@@ -288,9 +336,7 @@ class TelegramBotService
             $payload['text'] = $text;
         }
 
-        $response = Http::post($this->apiUrl('answerCallbackQuery'), $payload);
-
-        return $response->json() ?? [];
+        return $this->request('answerCallbackQuery', $payload);
     }
 
     // -------------------------------------------------------------------------
@@ -352,163 +398,76 @@ class TelegramBotService
             $payload['secret_token'] = $secretToken;
         }
 
-        $response = Http::post($this->apiUrl('setWebhook'), $payload);
-
-        return $response->json() ?? [];
+        return $this->request('setWebhook', $payload);
     }
 
     public function webhookInfo(): array
     {
-        $response = Http::get($this->apiUrl('getWebhookInfo'));
+        try {
+            $response = Http::timeout(self::TIMEOUT_SECONDS)
+                ->get($this->apiUrl('getWebhookInfo'));
+        } catch (ConnectionException $e) {
+            return ['ok' => false, 'description' => $e->getMessage()];
+        }
 
-        return $response->json() ?? [];
+        return $response->json() ?? ['ok' => false];
     }
 
     public function deleteWebhook(): array
     {
-        $response = Http::post($this->apiUrl('deleteWebhook'), [
+        return $this->request('deleteWebhook', [
             'drop_pending_updates' => true,
         ]);
-
-        return $response->json() ?? [];
     }
 
     public function isAdmin(string|int $chatId, string|int $userId): bool
     {
-        $response = Http::post($this->apiUrl('getChatMember'), [
+        $response = $this->request('getChatMember', [
             'chat_id' => $chatId,
             'user_id' => $userId,
-        ])->json();
+        ]);
 
         $status = $response['result']['status'] ?? '';
 
         return in_array($status, ['administrator', 'creator'], true);
     }
 
-    // -------------------------------------------------------------------------
-    // Internal HTTP
-    // -------------------------------------------------------------------------
-
-    private function request(string $method, array $payload): bool|array
+    public function addToGroupUrl(string $payload = 'true'): string
     {
-        $response = Http::post($this->apiUrl($method), $payload);
+        $username = config('services.telegram.bot_username');
 
-        if (! $response->successful()) {
-            Log::warning('Telegram request failed', [
-                'method'  => $method,
-                'status'  => $response->status(),
-                'body'    => $response->body(),
-                'payload' => $payload,
-            ]);
-        }
+        $username = ltrim((string) $username, '@');
 
-        return $response->json() ?? false;
+        return 'https://t.me/' . $username . '?startgroup=' . urlencode($payload);
     }
-
-    public function sendPhoto(
-        string $chatId,
-        string $photo,
-        ?string $caption = null,
-        array $extra = []
+    public function editPlainMessage(
+        string|int $chatId,
+        int $messageId,
+        string $text,
+        array $inlineKeyboard = []
     ): array {
-        $payload = array_merge([
-            'chat_id' => $chatId,
-            'photo' => $photo,
-        ], $extra);
-    
-        if ($caption) {
-            $payload['caption'] = $caption;
-            $payload['parse_mode'] = 'Markdown';
-        }
-    
-        return $this->request('sendPhoto', $payload);
-    }
-    
-    public function sendPhotoUpload(
-        string $chatId,
-        string $filePath,
-        ?string $caption = null,
-        array $extra = []
-    ): array {
-        if (! file_exists($filePath)) {
-            return [
-                'ok' => false,
-                'description' => 'Photo file does not exist: ' . $filePath,
-            ];
-        }
-    
-        $payload = array_merge([
-            'chat_id' => $chatId,
-            'photo' => new \CURLFile($filePath),
-        ], $extra);
-    
-        if ($caption) {
-            $payload['caption'] = $caption;
-            $payload['parse_mode'] = 'Markdown';
-        }
-    
-        return $this->requestMultipart('sendPhoto', $payload);
-    }
-    
-    public function sendDocumentUpload(
-        string $chatId,
-        string $filePath,
-        ?string $caption = null,
-        array $extra = []
-    ): array {
-        if (! file_exists($filePath)) {
-            return [
-                'ok' => false,
-                'description' => 'Document file does not exist: ' . $filePath,
-            ];
-        }
-    
-        $payload = array_merge([
-            'chat_id' => $chatId,
-            'document' => new \CURLFile($filePath),
-        ], $extra);
-    
-        if ($caption) {
-            $payload['caption'] = $caption;
-            $payload['parse_mode'] = 'Markdown';
-        }
-    
-        return $this->requestMultipart('sendDocument', $payload);
-    }
-    
-    private function requestMultipart(string $method, array $payload): array
-    {
-        /**
-         * Change this if your Telegram token config key is different.
-         */
-        $token = config('services.telegram.bot_token');
-    
-        $url = "https://api.telegram.org/bot{$token}/{$method}";
-    
-        $ch = curl_init();
-    
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POSTFIELDS => $payload,
+        return $this->request('editMessageText', [
+            'chat_id'      => $chatId,
+            'message_id'   => $messageId,
+            'text'         => $text,
+            'parse_mode'   => 'HTML',
+            'reply_markup' => json_encode(['inline_keyboard' => $inlineKeyboard]),
         ]);
-    
-        $response = curl_exec($ch);
-        $error = curl_error($ch);
-    
-        curl_close($ch);
-    
-        if ($error) {
-            return [
-                'ok' => false,
-                'description' => $error,
-            ];
-        }
-    
-        return json_decode((string) $response, true) ?: [
-            'ok' => false,
-            'raw' => $response,
-        ];
     }
+    
+    public function editMessageCaption(
+        string|int $chatId,
+        int $messageId,
+        string $caption,
+        array $inlineKeyboard = []
+    ): array {
+        return $this->request('editMessageCaption', [
+            'chat_id'      => $chatId,
+            'message_id'   => $messageId,
+            'caption'      => $caption,
+            'parse_mode'   => 'HTML',
+            'reply_markup' => json_encode(['inline_keyboard' => $inlineKeyboard]),
+        ]);
+    }
+
 }

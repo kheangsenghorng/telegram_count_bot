@@ -46,16 +46,16 @@ class TelegramPayment extends Model
     ];
 
     protected $casts = [
-        'amount'              => 'decimal:2',
-        'payment_date'        => 'datetime',
-        'report_date'         => 'date',
-        'report_month'        => 'integer',
-        'report_year'         => 'integer',
+        'amount' => 'decimal:2',
+        'payment_date' => 'datetime',
+        'report_date' => 'date',
+        'report_month' => 'integer',
+        'report_year' => 'integer',
         'parsed_successfully' => 'boolean',
-        'is_duplicate'        => 'boolean',
+        'is_duplicate' => 'boolean',
     ];
 
-    protected static function boot()
+    protected static function boot(): void
     {
         parent::boot();
 
@@ -63,20 +63,38 @@ class TelegramPayment extends Model
             if (! $payment->telegram_paymentID) {
                 $payment->telegram_paymentID = (string) Str::uuid();
             }
+
+            if ($payment->parsed_successfully === null) {
+                $payment->parsed_successfully = true;
+            }
+
+            if ($payment->is_duplicate === null) {
+                $payment->is_duplicate = false;
+            }
+
+            if (! $payment->status) {
+                $payment->status = 'success';
+            }
         });
 
-        // ── Auto-consume subscription quota ──────────────────────────────
-        // When a real (parsed, non-duplicate) payment is captured and linked
-        // to a subscription, increment payment_used automatically.
+        /*
+        |--------------------------------------------------------------------------
+        | Auto-consume subscription quota
+        |--------------------------------------------------------------------------
+        | Only when new payment row is created.
+        | Do not call consumePayment() again in AbaPaymentService.
+        */
         static::created(function (self $payment) {
             if ($payment->countsTowardQuota()) {
                 $payment->subscription?->consumePayment();
             }
         });
 
-        // ── Refund quota when a counted payment is deleted ───────────────
-        // e.g. manually deleting orphan/incorrect rows should give the
-        // quota back so the user is not charged for it.
+        /*
+        |--------------------------------------------------------------------------
+        | Refund quota when counted payment is deleted
+        |--------------------------------------------------------------------------
+        */
         static::deleted(function (self $payment) {
             if (! $payment->countsTowardQuota()) {
                 return;
@@ -94,21 +112,14 @@ class TelegramPayment extends Model
         });
     }
 
-    /**
-     * Whether this payment should count against the subscription quota.
-     * Parse-failed rows (trx_id NULL) and duplicates never consume quota.
-     */
     public function countsTowardQuota(): bool
     {
         return $this->subscription_id !== null
-            && $this->parsed_successfully
-            && ! $this->is_duplicate;
+            && (bool) $this->parsed_successfully === true
+            && (bool) $this->is_duplicate === false
+            && ! empty($this->trx_id);
     }
 
-    /**
-     * Auto-delete orphan payments:
-     * rows with no user, no group, and no subscription.
-     */
     public function prunable(): Builder
     {
         return self::query()
@@ -118,16 +129,12 @@ class TelegramPayment extends Model
             ->where('created_at', '<', now()->subDays(1));
     }
 
-    // ── Scopes ────────────────────────────────────────────────────────────
-
-    /**
-     * Only payments that count for stats/quota (parsed, not duplicate).
-     */
     public function scopeCounted(Builder $query): Builder
     {
         return $query
             ->where('parsed_successfully', true)
-            ->where('is_duplicate', false);
+            ->where('is_duplicate', false)
+            ->whereNotNull('trx_id');
     }
 
     public function scopeForGroup(Builder $query, string $telegramGroupId): Builder
@@ -144,8 +151,6 @@ class TelegramPayment extends Model
     {
         return $query->where('currency', strtoupper($currency));
     }
-
-    // ── Relations ─────────────────────────────────────────────────────────
 
     public function user()
     {

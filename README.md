@@ -1,60 +1,104 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Telegram Count Bot
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Laravel application that listens to ABA Pay payment notifications in Telegram, records each transaction, and sends daily, weekly, and monthly income summaries back to Telegram. It also exposes a KHQR payment API and a package/subscription checkout flow.
 
-## About Laravel
+## Requirements
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- PHP 8.2+
+- Composer
+- MySQL
+- Ngrok (for exposing the webhook locally)
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Setup
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+```bash
+git clone https://github.com/kheangsenghorng/telegram_count_bot.git
+cd telegram_count_bot
+composer install
+cp .env.example .env
+php artisan key:generate
+```
 
-## Learning Laravel
+Configure your database and Telegram token in `.env`:
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+```env
+DB_DATABASE=telegram_count_bot
+DB_USERNAME=root
+DB_PASSWORD=
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+```
 
-## Laravel Sponsors
+Run migrations:
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+```bash
+php artisan migrate
+```
 
-### Premium Partners
+## Running locally
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+Start the app and expose it with Ngrok:
 
-## Contributing
+```bash
+php artisan serve
+ngrok http 8000
+```
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Point the Telegram webhook at your Ngrok URL:
 
-## Code of Conduct
+```bash
+GET https://<your-ngrok-domain>/api/telegram/set-webhook
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+Run the queue and scheduler in separate terminals:
 
-## Security Vulnerabilities
+```bash
+php artisan queue:work
+php artisan schedule:work
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Optionally, listen to a Telegram group as a user account (via MadelineProto) instead of the bot webhook:
+
+```bash
+php artisan telegram:listen
+```
+
+## Useful commands
+
+| Command | Purpose |
+|---|---|
+| `php artisan telegram:webhook` | Manage the Telegram bot webhook |
+| `php artisan telegram:listen` | Listen for ABA Pay messages as a Telegram user |
+| `php artisan queue:work` | Process queued jobs (summaries, notifications) |
+| `php artisan schedule:work` | Run scheduled jobs (day/week/month summaries, stale-transaction pruning) |
+| `php artisan optimize:clear` | Clear cached config, routes, and views |
+
+## API
+
+| Route | Purpose |
+|---|---|
+| `POST /api/telegram/webhook` | Telegram webhook entry point |
+| `GET /api/telegram/webhook-info` | Inspect current webhook status |
+| `POST /api/v1/khqr/merchant` | Generate a merchant KHQR code |
+| `POST /api/v1/khqr/individual` | Generate an individual KHQR code |
+| `POST /api/v1/khqr/check-transaction-by-md5` | Verify a KHQR transaction |
+| `GET /api/v1/khqr/payment-checkout/{transactionId}` | View a payment checkout page |
+
+See `routes/api/*.php` for the full route list (admin, owner, customer, auth).
+
+## Example payment message
+
+```text
+៛10,500 paid by DUONG SOKHA (*256) on Jun 20, 05:56 PM via ABA PAY at CHEN KHEANG. Trx. ID: 178195299977822, APV: 418335.
+```
+
+The bot parses and stores the amount, customer name, payment method, store name, transaction ID, APV code, and timestamp.
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
-# telegram_count_bot
+Open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+
+## Author
+
+Developed by **Kheang SengHorng**.
