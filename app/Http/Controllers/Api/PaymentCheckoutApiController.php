@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Telegram\SubscriptionLinkHandler;
 use App\Http\Controllers\Controller;
 use App\Models\PackageTransaction;
 use App\Models\SubscriptionUsageLog;
 use App\Models\UserSubscription;
 use App\Services\Khqr\BakongService;
+use App\Services\TelegramBotService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -70,12 +72,16 @@ class PaymentCheckoutApiController extends Controller
         ]);
     }
 
-    public function check(string $transactionId, BakongService $bakong): JsonResponse
-    {
+    public function check(
+        string $transactionId,
+        BakongService $bakong,
+        TelegramBotService $telegram,
+        SubscriptionLinkHandler $subscriptionLink
+    ): JsonResponse {
         $transaction = PackageTransaction::with(['package', 'user'])
             ->where('packageTransactionsID', $transactionId)
             ->first();
-
+    
         if (! $transaction) {
             return response()->json([
                 'success' => false,
@@ -83,8 +89,27 @@ class PaymentCheckoutApiController extends Controller
                 'message' => 'Payment transaction not found',
             ], 404);
         }
-
+    
+        /**
+         * Already paid.
+         * Still try to delete old Telegram payment message and send success message once.
+         */
         if ($transaction->status === 'paid') {
+            $this->deleteTelegramPaymentMessage($transaction, $telegram);
+    
+            if ($transaction->subscription_id && ! empty($transaction->telegram_chat_id)) {
+                $subscription = UserSubscription::with('package')
+                    ->where('userSubscriptionsID', $transaction->subscription_id)
+                    ->first();
+    
+                if ($subscription) {
+                    $subscriptionLink->sendPaymentSuccess(
+                        $subscription,
+                        $transaction->telegram_chat_id
+                    );
+                }
+            }
+    
             return response()->json([
                 'success' => true,
                 'status' => 'success',
@@ -92,7 +117,10 @@ class PaymentCheckoutApiController extends Controller
                 'subscription_id' => $transaction->subscription_id,
             ]);
         }
-
+    
+        /**
+         * Expired payment.
+         */
         if (
             $transaction->status === 'pending'
             && $transaction->expires_at
@@ -101,14 +129,14 @@ class PaymentCheckoutApiController extends Controller
             $transaction->update([
                 'status' => 'expired',
             ]);
-
+    
             return response()->json([
                 'success' => false,
                 'status' => 'expired',
                 'message' => 'Payment expired',
             ]);
         }
-
+    
         if (! $transaction->md5) {
             return response()->json([
                 'success' => false,
@@ -116,9 +144,12 @@ class PaymentCheckoutApiController extends Controller
                 'message' => 'MD5 not found for this transaction',
             ], 422);
         }
-
+    
+        /**
+         * Check Bakong by MD5.
+         */
         $result = $bakong->checkTransactionByMd5($transaction->md5);
-
+    
         $isPaid =
             data_get($result, 'responseCode') === 0
             || data_get($result, 'responseMessage') === 'Success'
@@ -129,7 +160,7 @@ class PaymentCheckoutApiController extends Controller
                     || data_get($result, 'data.responseMessage') === 'Success'
                 )
             );
-
+    
         if (! $isPaid) {
             return response()->json([
                 'success' => false,
@@ -141,60 +172,56 @@ class PaymentCheckoutApiController extends Controller
                 'raw' => $result,
             ]);
         }
-
+    
         try {
             $subscription = DB::transaction(function () use ($transaction, $result) {
                 $package = $transaction->package;
-
+    
                 if (! $package) {
                     throw new \Exception('Package not found for this transaction.');
                 }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Prevent duplicate activation
-                |--------------------------------------------------------------------------
-                */
+    
+                /**
+                 * Prevent duplicate activation.
+                 */
                 if ($transaction->subscription_id) {
                     $existingSubscription = UserSubscription::where(
                         'userSubscriptionsID',
                         $transaction->subscription_id
                     )->first();
-
+    
                     if ($existingSubscription) {
                         $transaction->update([
                             'status' => 'paid',
                             'paid_at' => $transaction->paid_at ?? now(),
                         ]);
-
+    
                         return $existingSubscription;
                     }
                 }
-
-                $transactionId = (string) (
+    
+                $realTransactionId = (string) (
                     $transaction->external_transaction_id
                     ?? $transaction->packageTransactionsID
                 );
-
+    
                 $existingByTransaction = UserSubscription::query()
-                    ->where('transaction_id', $transactionId)
+                    ->where('transaction_id', $realTransactionId)
                     ->first();
-
+    
                 if ($existingByTransaction) {
                     $transaction->update([
                         'subscription_id' => $existingByTransaction->userSubscriptionsID,
                         'status' => 'paid',
                         'paid_at' => $transaction->paid_at ?? now(),
                     ]);
-
+    
                     return $existingByTransaction;
                 }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Find current active subscription for same user
-                |--------------------------------------------------------------------------
-                */
+    
+                /**
+                 * Find current active subscription for same user.
+                 */
                 $currentSubscription = UserSubscription::query()
                     ->with('package')
                     ->where('user_id', $transaction->user_id)
@@ -206,28 +233,20 @@ class PaymentCheckoutApiController extends Controller
                     ->latest('starts_at')
                     ->lockForUpdate()
                     ->first();
-
-                /*
-                |--------------------------------------------------------------------------
-                | Carry-over logic
-                |--------------------------------------------------------------------------
-                | Example:
-                | Old package limit: 1500
-                | Old used: 1400
-                | Remaining: 100
-                | New package limit: 4000
-                | New override_payment_limit: 4100
-                */
+    
+                /**
+                 * Carry-over logic.
+                 */
                 $carryOverPayments = 0;
                 $carryOverGroupsUsed = 0;
-
+    
                 if ($currentSubscription) {
                     $carryOverPayments = $currentSubscription->carryOverPayments();
                     $carryOverGroupsUsed = $currentSubscription->carryOverGroupsUsed();
                 }
-
+    
                 $overridePaymentLimit = null;
-
+    
                 if (
                     method_exists($package, 'isUnlimitedPayments')
                     && ! $package->isUnlimitedPayments()
@@ -235,56 +254,52 @@ class PaymentCheckoutApiController extends Controller
                 ) {
                     $overridePaymentLimit = (int) $package->payment_limit + $carryOverPayments;
                 }
-
+    
                 $startsAt = now();
-
+    
                 $endsAt = match ($package->billing_cycle) {
                     'monthly' => $startsAt->copy()->addMonth(),
                     'yearly' => $startsAt->copy()->addYear(),
                     'lifetime' => null,
                     default => $startsAt->copy()->addMonth(),
                 };
-
-                /*
-                |--------------------------------------------------------------------------
-                | Cancel old subscription
-                |--------------------------------------------------------------------------
-                */
+    
+                /**
+                 * Cancel old subscription.
+                 */
                 if ($currentSubscription) {
                     $currentSubscription->update([
                         'status' => 'cancelled',
                     ]);
                 }
-
-                /*
-                |--------------------------------------------------------------------------
-                | Create new upgraded subscription
-                |--------------------------------------------------------------------------
-                */
+    
+                /**
+                 * Create new subscription.
+                 */
                 $subscription = UserSubscription::create([
                     'user_id' => $transaction->user_id,
                     'package_id' => $transaction->package_id,
-
+    
                     'override_payment_limit' => $overridePaymentLimit,
                     'override_group_limit' => null,
-
+    
                     'payment_used' => 0,
                     'group_used' => $carryOverGroupsUsed,
-
+    
                     'starts_at' => $startsAt,
                     'ends_at' => $endsAt,
-
+    
                     'status' => 'active',
                     'payment_method' => $transaction->payment_method,
-                    'transaction_id' => $transactionId,
+                    'transaction_id' => $realTransactionId,
                 ]);
-
+    
                 $transaction->update([
                     'subscription_id' => $subscription->userSubscriptionsID,
                     'status' => 'paid',
                     'paid_at' => now(),
                 ]);
-
+    
                 SubscriptionUsageLog::create([
                     'subscription_id' => $subscription->userSubscriptionsID,
                     'user_id' => $transaction->user_id,
@@ -303,7 +318,7 @@ class PaymentCheckoutApiController extends Controller
                         'external_transaction_id' => $transaction->external_transaction_id,
                         'md5' => $transaction->md5,
                         'bakong_result' => $result,
-
+    
                         'old_subscription_id' => $currentSubscription?->userSubscriptionsID,
                         'carried_over_payments' => $carryOverPayments,
                         'carried_over_groups_used' => $carryOverGroupsUsed,
@@ -311,7 +326,7 @@ class PaymentCheckoutApiController extends Controller
                         'new_effective_payment_limit' => $subscription->effectivePaymentLimit(),
                     ],
                 ]);
-
+    
                 Log::info('Package subscription activated', [
                     'user_id' => $transaction->user_id,
                     'package_id' => $transaction->package_id,
@@ -319,12 +334,17 @@ class PaymentCheckoutApiController extends Controller
                     'old_subscription_id' => $currentSubscription?->userSubscriptionsID,
                     'carried_over_payments' => $carryOverPayments,
                     'override_payment_limit' => $overridePaymentLimit,
-                    'transaction_id' => $transactionId,
+                    'transaction_id' => $realTransactionId,
                 ]);
-
+    
                 return $subscription;
             });
         } catch (Throwable $e) {
+            Log::error('Package subscription activation failed', [
+                'package_transaction_id' => $transaction->packageTransactionsID,
+                'error' => $e->getMessage(),
+            ]);
+    
             return response()->json([
                 'success' => false,
                 'status' => 'error',
@@ -332,7 +352,28 @@ class PaymentCheckoutApiController extends Controller
                 'error' => $e->getMessage(),
             ], 500);
         }
-
+    
+        /**
+         * Refresh transaction after DB transaction.
+         */
+        $transaction->refresh();
+    
+        /**
+         * Delete old Telegram confirmation message:
+         * 🛒 បញ្ជាក់ការទិញ...
+         */
+        $this->deleteTelegramPaymentMessage($transaction, $telegram);
+    
+        /**
+         * Send new success message with Add Bot to Group button.
+         */
+        if (! empty($transaction->telegram_chat_id)) {
+            $subscriptionLink->sendPaymentSuccess(
+                $subscription,
+                $transaction->telegram_chat_id
+            );
+        }
+    
         return response()->json([
             'success' => true,
             'status' => 'success',
@@ -341,4 +382,34 @@ class PaymentCheckoutApiController extends Controller
             'data' => $result,
         ]);
     }
+    private function deleteTelegramPaymentMessage(?PackageTransaction $transaction, TelegramBotService $telegram): void
+{
+    if (! $transaction) {
+        return;
+    }
+
+    if (empty($transaction->telegram_chat_id) || empty($transaction->telegram_message_id)) {
+        return;
+    }
+
+    try {
+        $telegram->deleteMessage(
+            $transaction->telegram_chat_id,
+            (int) $transaction->telegram_message_id
+        );
+
+        Log::info('Telegram payment message deleted', [
+            'package_transaction_id' => $transaction->packageTransactionsID,
+            'chat_id' => $transaction->telegram_chat_id,
+            'message_id' => $transaction->telegram_message_id,
+        ]);
+    } catch (Throwable $e) {
+        Log::warning('Failed to delete Telegram payment message', [
+            'package_transaction_id' => $transaction->packageTransactionsID,
+            'chat_id' => $transaction->telegram_chat_id,
+            'message_id' => $transaction->telegram_message_id,
+            'error' => $e->getMessage(),
+        ]);
+    }
+}
 }

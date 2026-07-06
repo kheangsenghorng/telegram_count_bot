@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\RecalculateSubscriptionPaymentUsageJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -12,24 +13,27 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 
-// ថ្ងៃ — daily summary at 10:00 PM Cambodia time
+// ថ្ងៃ — daily summary at 3:30 PM Cambodia time (TESTING — change to 22:00 for production)
 Schedule::job(new SendStatsSummaryJob('day'))
-    ->dailyAt('22:00')
+    ->name('stats-summary-day')
+    ->dailyAt('15:20')
     ->timezone('Asia/Phnom_Penh')
     ->withoutOverlapping()
     ->onOneServer();
 
 
-// សប្តាហ៍ — weekly summary, Monday at 10:00 PM Cambodia time
+// សប្តាហ៍ — weekly summary, Monday at 3:30 PM Cambodia time (TESTING — change to 22:00)
 Schedule::job(new SendStatsSummaryJob('week'))
+    ->name('stats-summary-week')
     ->weeklyOn(1, '22:00')
     ->timezone('Asia/Phnom_Penh')
     ->withoutOverlapping()
     ->onOneServer();
 
 
-// ខែ — monthly summary, 1st day of month at 10:00 PM Cambodia time
+// ខែ — monthly summary, 1st day of month at 3:30 PM Cambodia time (TESTING — change to 22:00)
 Schedule::job(new SendStatsSummaryJob('month'))
+    ->name('stats-summary-month')
     ->monthlyOn(1, '22:00')
     ->timezone('Asia/Phnom_Penh')
     ->withoutOverlapping()
@@ -43,7 +47,21 @@ Schedule::command('model:prune', [
         TelegramPayment::class,
     ],
 ])
-    ->dailyAt('02:00')
+    ->name('prune-stale-transactions')
+    ->dailyAt('00:00')
+    ->timezone('Asia/Phnom_Penh')
+    ->withoutOverlapping()
+    ->onOneServer();
+
+
+Schedule::job(new RecalculateSubscriptionPaymentUsageJob())
+->name('recalculate-payment-usage')
+->hourly()
+->withoutOverlapping()
+->onOneServer(); 
+
+Schedule::command('subscriptions:send-renewal-reminders')
+    ->hourly()
     ->timezone('Asia/Phnom_Penh')
     ->withoutOverlapping()
     ->onOneServer();

@@ -19,6 +19,8 @@ class SendStatsSummaryJob implements ShouldQueue
 
     public int $tries = 1;
 
+    public int $timeout = 600; // 10 min max — plenty for large group counts
+
     public function __construct(
         public string $period = 'day'
     ) {}
@@ -27,22 +29,34 @@ class SendStatsSummaryJob implements ShouldQueue
         PaymentStatsService $stats,
         TelegramBotService $bot
     ): void {
+        Log::info('Stats summary job started', ['period' => $this->period]);
+
+        $sent   = 0;
+        $failed = 0;
+
         TelegramGroup::query()
             ->whereNotNull('group_id')
             ->where('status', 'connected')
-            ->chunkById(100, function ($groups) use ($stats, $bot) {
+            ->chunkById(100, function ($groups) use ($stats, $bot, &$sent, &$failed) {
                 foreach ($groups as $group) {
-                    $this->sendToGroup($group, $stats, $bot);
+                    $this->sendToGroup($group, $stats, $bot) ? $sent++ : $failed++;
+
                     usleep(50_000); // ~20 sends/sec, under Telegram's ceiling
                 }
             });
+
+        Log::info('Stats summary job finished', [
+            'period' => $this->period,
+            'sent'   => $sent,
+            'failed' => $failed,
+        ]);
     }
 
     private function sendToGroup(
         TelegramGroup $group,
         PaymentStatsService $stats,
         TelegramBotService $bot
-    ): void {
+    ): bool {
         try {
             $summary = match ($this->period) {
                 'day'   => $stats->day($group->telegramGroupsID, 'scheduler'),
@@ -52,18 +66,48 @@ class SendStatsSummaryJob implements ShouldQueue
                 default => $stats->day($group->telegramGroupsID, 'scheduler'),
             };
 
-            $bot->sendMessage($group->group_id, $summary);
+            $result = $bot->sendMessage($group->group_id, $summary);
         } catch (\Throwable $e) {
-            if (str_contains($e->getMessage(), '403')) {
-                $group->update(['status' => 'disconnected']);
-            }
-
+            // Only stats-building errors land here now —
+            // TelegramBotService returns errors as arrays, it doesn't throw.
             Log::warning('Stats summary failed for group', [
                 'group'  => $group->telegramGroupsID,
                 'period' => $this->period,
                 'error'  => $e->getMessage(),
             ]);
+
+            return false;
         }
+
+        if (($result['ok'] ?? false) === true) {
+            return true;
+        }
+
+        // Bot was kicked / group deleted → stop sending to it
+        if (($result['error_code'] ?? 0) === 403) {
+            $group->update(['status' => 'disconnected']);
+
+            Log::info('Group auto-disconnected (bot removed)', [
+                'group' => $group->telegramGroupsID,
+            ]);
+        }
+
+        Log::warning('Stats summary failed for group', [
+            'group'      => $group->telegramGroupsID,
+            'period'     => $this->period,
+            'error_code' => $result['error_code'] ?? null,
+            'error'      => $result['description'] ?? 'unknown',
+        ]);
+
+        return false;
+    }
+
+    public function failed(\Throwable $e): void
+    {
+        Log::error('Stats summary job failed completely', [
+            'period' => $this->period,
+            'error'  => $e->getMessage(),
+        ]);
     }
 
     private function currentWeekOfMonth(): int

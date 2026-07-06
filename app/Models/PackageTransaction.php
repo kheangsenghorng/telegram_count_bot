@@ -32,6 +32,9 @@ class PackageTransaction extends Model
         'qr_image_url',
         'md5',
         'expires_at',
+
+        'telegram_chat_id',
+        'telegram_message_id',
         'status',
         'paid_at',
     ];

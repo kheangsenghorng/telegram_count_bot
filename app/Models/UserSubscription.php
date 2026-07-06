@@ -28,6 +28,7 @@ class UserSubscription extends Model
         'group_used',
         'starts_at',
         'ends_at',
+        'renewal_reminded_at',
         'status',
         'payment_method',
         'transaction_id',
@@ -40,6 +41,7 @@ class UserSubscription extends Model
         'group_used'             => 'integer',
         'starts_at'              => 'datetime',
         'ends_at'                => 'datetime',
+        'renewal_reminded_at' => 'datetime',
     ];
 
     protected static function boot(): void
