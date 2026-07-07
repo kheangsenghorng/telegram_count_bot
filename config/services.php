@@ -42,6 +42,8 @@ return [
         'support_username' => env('TELEGRAM_SUPPORT_USERNAME'),
         'support_phone'    => env('TELEGRAM_SUPPORT_PHONE'),
         'support_hours'    => env('TELEGRAM_SUPPORT_HOURS', 'Mon-Fri 8:00 - 17:00'),
+        'test_chat_id' => env('TELEGRAM_TEST_CHAT_ID'),
+        'renewal_reminder_time' => env('RENEWAL_REMINDER_TIME', '09:00'),
     ],
     'bakong_gateway' => [
         'url' => env('BAKONG_GATEWAY_URL'),

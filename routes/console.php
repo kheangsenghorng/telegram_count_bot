@@ -4,26 +4,49 @@ use App\Jobs\RecalculateSubscriptionPaymentUsageJob;
 use App\Jobs\SendStatsSummaryJob;
 use App\Models\PackageTransaction;
 use App\Models\TelegramPayment;
+use App\Services\TelegramBotService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Schedule;
-use App\Services\TelegramBotService;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schedule;
+
+Artisan::command('inspire', function () {
+    $this->comment(Inspiring::quote());
+})->purpose('Display an inspiring quote');
+
+/*
+|--------------------------------------------------------------------------
+| Schedule Timezone
+|--------------------------------------------------------------------------
+*/
+
+$timezone = 'Asia/Phnom_Penh';
+
+/*
+|--------------------------------------------------------------------------
+| Telegram test schedule
+|--------------------------------------------------------------------------
+| Sends a test Telegram message every day at 8:30 PM Cambodia time.
+*/
 
 Artisan::command('telegram:test-schedule', function (TelegramBotService $telegram) {
-    $chatId = env('TELEGRAM_TEST_CHAT_ID');
+    $chatId = config('services.telegram.test_chat_id');
 
     if (! $chatId) {
         Log::warning('Telegram test schedule failed: TELEGRAM_TEST_CHAT_ID is missing');
+
         $this->error('TELEGRAM_TEST_CHAT_ID is missing');
+
         return self::FAILURE;
     }
 
-    $telegram->sendMessage($chatId, 'welcome to bot telegram');
+    $message = 'welcome to bot telegram';
+
+    $telegram->sendMessage($chatId, $message);
 
     Log::info('Telegram test schedule message sent', [
         'chat_id' => $chatId,
-        'message' => 'welcome to bot telegram',
+        'message' => $message,
     ]);
 
     $this->info('Telegram test schedule message sent.');
@@ -31,21 +54,12 @@ Artisan::command('telegram:test-schedule', function (TelegramBotService $telegra
     return self::SUCCESS;
 })->purpose('Send test Telegram schedule message');
 
-// Test Telegram schedule message — daily at 8:30 PM Cambodia time
 Schedule::command('telegram:test-schedule')
     ->name('telegram-test-schedule')
     ->dailyAt('20:30')
-    ->timezone('Asia/Phnom_Penh')
+    ->timezone($timezone)
     ->withoutOverlapping()
     ->onOneServer();
-
-
-/*
-|--------------------------------------------------------------------------
-| Schedule Timezone
-|--------------------------------------------------------------------------
-*/
-$timezone = 'Asia/Phnom_Penh';
 
 /*
 |--------------------------------------------------------------------------
@@ -102,6 +116,7 @@ Schedule::command('model:prune', [
 | Data integrity
 |--------------------------------------------------------------------------
 | Recalculate payment_used from real TelegramPayment rows every hour.
+| Enable this only when you want hourly recalculation.
 */
 
 // Schedule::job(new RecalculateSubscriptionPaymentUsageJob())
@@ -121,7 +136,7 @@ Schedule::command('model:prune', [
 
 Schedule::command('subscriptions:send-renewal-reminders')
     ->name('send-renewal-reminders')
-    ->dailyAt(env('RENEWAL_REMINDER_TIME', '09:00'))
-    ->timezone('Asia/Phnom_Penh')
+    ->dailyAt(config('services.telegram.renewal_reminder_time', '09:00'))
+    ->timezone($timezone)
     ->withoutOverlapping()
     ->onOneServer();
