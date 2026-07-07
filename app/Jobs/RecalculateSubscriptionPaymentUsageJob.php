@@ -22,8 +22,11 @@ class RecalculateSubscriptionPaymentUsageJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
 
+    public int $tries = 2;
+
     public function __construct(
         public ?string $subscriptionId = null,
+        public bool $includeInactive = false,
     ) {}
 
     public function handle(): void
@@ -32,55 +35,65 @@ class RecalculateSubscriptionPaymentUsageJob implements ShouldQueue
 
         if ($this->subscriptionId) {
             $query->where('userSubscriptionsID', $this->subscriptionId);
+        } elseif (! $this->includeInactive) {
+            // Only active subs by default — cancelled/expired quotas
+            // are frozen history, no need to touch them.
+            $query->where('status', 'active');
         }
 
         $query
-            ->select([
-                'userSubscriptionsID',
-                'user_id',
-                'payment_used',
-                'status',
-            ])
+            ->select(['userSubscriptionsID'])
             ->chunkById(
                 100,
                 function (Collection $subscriptions): void {
                     foreach ($subscriptions as $subscription) {
-                        $this->recalculateOne($subscription);
+                        $this->recalculateOne($subscription->userSubscriptionsID);
                     }
                 },
                 column: 'userSubscriptionsID'
             );
     }
 
-    private function recalculateOne(UserSubscription $subscription): void
+    private function recalculateOne(string $subscriptionId): void
     {
-        $realPaymentCount = TelegramPayment::query()
-            ->where('subscription_id', $subscription->userSubscriptionsID)
-            ->where('status', 'success')
-            ->where('parsed_successfully', true)
-            ->where(function ($query) {
-                $query->where('is_duplicate', false)
-                    ->orWhereNull('is_duplicate');
-            })
-            ->count();
+        DB::transaction(function () use ($subscriptionId): void {
+            // Lock the row first, so a concurrent consumePayment()
+            // increment can't slip between our count and our write.
+            $subscription = UserSubscription::query()
+                ->where('userSubscriptionsID', $subscriptionId)
+                ->lockForUpdate()
+                ->first();
 
-        if ((int) $subscription->payment_used === $realPaymentCount) {
-            return;
-        }
+            if (! $subscription) {
+                return;
+            }
 
-        DB::transaction(function () use ($subscription, $realPaymentCount): void {
-            UserSubscription::query()
-                ->where('userSubscriptionsID', $subscription->userSubscriptionsID)
-                ->update([
-                    'payment_used' => $realPaymentCount,
-                    'updated_at' => now(),
-                ]);
+            $realPaymentCount = TelegramPayment::query()
+                ->where('subscription_id', $subscriptionId)
+                ->where('status', 'success')
+                ->where('parsed_successfully', true)
+                ->where(function ($query) {
+                    $query->where('is_duplicate', false)
+                        ->orWhereNull('is_duplicate');
+                })
+                ->count();
+
+            if ((int) $subscription->payment_used === $realPaymentCount) {
+                return;
+            }
+
+            $old = (int) $subscription->payment_used;
+
+            $subscription->forceFill([
+                'payment_used' => $realPaymentCount,
+            ])->save();
+
+            Log::info('Subscription payment_used recalculated', [
+                'subscription_id'  => $subscriptionId,
+                'old_payment_used' => $old,
+                'new_payment_used' => $realPaymentCount,
+                'drift'            => $realPaymentCount - $old,
+            ]);
         });
-
-        Log::info('Subscription payment_used recalculated', [
-            'subscription_id' => $subscription->userSubscriptionsID,
-            'old_payment_used' => $subscription->payment_used,
-            'new_payment_used' => $realPaymentCount,
-        ]);
     }
 }

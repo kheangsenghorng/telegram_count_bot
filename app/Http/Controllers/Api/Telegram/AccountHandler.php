@@ -7,7 +7,6 @@ namespace App\Http\Controllers\Api\Telegram;
 use App\Models\User;
 use App\Services\TelegramBotService;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Str;
 
 class AccountHandler
 {
@@ -15,54 +14,109 @@ class AccountHandler
         protected TelegramBotService $telegram,
     ) {}
 
-    public function start(array $chat, array $from): JsonResponse
+    public function start(array $chat, array $from, string $text = ''): JsonResponse
     {
-        $chatId   = (string) ($chat['id'] ?? '');
-        $chatType = $chat['type'] ?? 'private';
+        $chatId = (string) data_get($chat, 'id');
+        $chatType = (string) data_get($chat, 'type', 'private');
+
+        $telegramId = (string) data_get($from, 'id');
+        $username = data_get($from, 'username');
+        $firstName = data_get($from, 'first_name');
+        $lastName = data_get($from, 'last_name');
 
         if ($chatType !== 'private') {
-            $this->telegram->sendMessage($chatId, '👋 Please open the bot in a private chat and send /start.');
+            $this->telegram->sendMessage(
+                $chatId,
+                '🔒 Please open this bot in a private chat.'
+            );
+
             return response()->json(['ok' => true]);
         }
 
-        $telegramId = (string) ($from['id'] ?? '');
-        $firstName  = $from['first_name'] ?? 'Telegram';
-        $lastName   = $from['last_name']  ?? null;
-        $username   = $from['username']   ?? null;
+        $payload = $this->getStartPayload($text);
 
-        $user = User::firstOrCreate(
-            ['telegram_id' => $telegramId],
-            [
-                'uuid'                => (string) Str::uuid(),
-                'first_name'          => $firstName,
-                'last_name'           => $lastName,
-                'email'               => "telegram_{$telegramId}@telegram.local",
-                'telegram_username'   => $username,
+        /*
+        |--------------------------------------------------------------------------
+        | Deep link from website/payment page
+        |--------------------------------------------------------------------------
+        | Example:
+        | /start user_550e8400-e29b-41d4-a716-446655440000
+        */
+        if ($payload && str_starts_with($payload, 'user_')) {
+            $uuid = str_replace('user_', '', $payload);
+
+            $user = User::where('uuid', $uuid)->first();
+
+            if (! $user) {
+                $this->telegram->sendMessage(
+                    $chatId,
+                    "❌ Account not found.\n\nPlease open the bot again from your payment page."
+                );
+
+                return response()->json(['ok' => true]);
+            }
+
+            $user->update([
+                'telegram_id' => $chatId,
+                'telegram_username' => $username,
                 'telegram_first_name' => $firstName,
-                'telegram_last_name'  => $lastName,
-                'password'            => bcrypt(Str::random(32)),
-                'role'                => 'user',
-                'status'              => 'active',
-            ]
-        );
+                'telegram_last_name' => $lastName,
+            ]);
 
-        $user->update([
-            'first_name'          => $firstName,
-            'last_name'           => $lastName,
-            'telegram_username'   => $username,
-            'telegram_first_name' => $firstName,
-            'telegram_last_name'  => $lastName,
-        ]);
+            $this->telegram->sendMessage(
+                $chatId,
+                "✅ *Telegram Connected Successfully!*\n\n" .
+                "Hi {$firstName}, your account is now connected with this Telegram chat.\n\n" .
+                "You will receive payment success notifications here."
+            );
 
-        $this->telegram->sendMainMenu(
-            $chatId,
-            "✅ Account ready!\n\nHello {$firstName}\nTelegram ID: {$telegramId}"
-        );
+            return response()->json(['ok' => true]);
+        }
 
-        return response()->json([
-            'ok'          => true,
-            'uuid'        => $user->uuid,
-            'telegram_id' => $telegramId,
-        ]);
+        /*
+        |--------------------------------------------------------------------------
+        | Normal /start
+        |--------------------------------------------------------------------------
+        */
+       /*
+|--------------------------------------------------------------------------
+| Normal /start
+|--------------------------------------------------------------------------
+*/
+$this->telegram->sendMessage(
+    $chatId,
+    "👋 Welcome!\n\n" .
+    "Please open this bot from your payment page to connect your account.\n\n" .
+    "After connecting, you will receive payment success notifications here.",
+    [
+        'reply_markup' => json_encode([
+            'keyboard' => [
+                [
+                    ['text' => '🆕 Package'],
+                    ['text' => '📊 My Limits'],
+                ],
+                [
+                    ['text' => '💬 Support'],
+                    ['text' => '🌐 Domains'],
+                ],
+                [
+                    ['text' => '🔒 Privacy Policy'],
+                    ['text' => '📜 Terms of Service'],
+                ],
+            ],
+            'resize_keyboard' => true,   // compact buttons
+            'is_persistent'   => true,   // keyboard stays visible
+        ], JSON_UNESCAPED_UNICODE),
+    ]
+);
+
+        return response()->json(['ok' => true]);
+    }
+
+    private function getStartPayload(string $text): ?string
+    {
+        $parts = explode(' ', trim($text), 2);
+
+        return $parts[1] ?? null;
     }
 }

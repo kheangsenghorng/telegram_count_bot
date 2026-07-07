@@ -136,8 +136,8 @@ class TelegramWebhookController extends Controller
             if ($this->subscriptionLink->handleGroupStart($message)) {
                 return response()->json(['ok' => true]);
             }
-
-            return $this->accountHandler->start($chat, $from);
+        
+            return $this->accountHandler->start($chat, $from, $text);   // ← pass $text
         }
 
         if (str_starts_with($text, '/connect')) {

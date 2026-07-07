@@ -22,6 +22,10 @@ class UserSubscriptionController extends Controller
                     ->paginate(10)
             )
         ]);
+
+
+
+        
     }
 
     public function store(UserSubscriptionStoreRequest $request)

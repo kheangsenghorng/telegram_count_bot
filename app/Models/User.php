@@ -63,15 +63,20 @@ class User extends Authenticatable implements JWTSubject
     }
 
     public function subscriptions()
-    {
-        return $this->hasMany(UserSubscription::class);
-    }
+{
+    return $this->hasMany(UserSubscription::class, 'user_id', 'uuid');
+}
 
-    public function activeSubscription()
-    {
-        return $this->hasOne(UserSubscription::class)
-            ->where('status', 'active');
-    }
+public function activeSubscription()
+{
+    return $this->hasOne(UserSubscription::class, 'user_id', 'uuid')
+        ->where('status', 'active')
+        ->where(function ($q) {
+            $q->whereNull('ends_at')->orWhere('ends_at', '>', now());
+        })
+        ->latest('starts_at');
+}
+
 
     public function telegramGroups()
     {
