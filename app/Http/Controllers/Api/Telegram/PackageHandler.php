@@ -32,12 +32,14 @@ class PackageHandler
     private function cycleLabel(?string $billingCycle): string
     {
         return match ($billingCycle) {
+            'weekly'   => '១ សប្តាហ៍',
             'monthly'  => '១ ខែ',
             'yearly'   => '១ ឆ្នាំ',
             'lifetime' => 'អចិន្ត្រៃយ៍',
             default    => (string) $billingCycle,
         };
     }
+    
 
     private function formatPrice(float|int|string|null $price): string
     {

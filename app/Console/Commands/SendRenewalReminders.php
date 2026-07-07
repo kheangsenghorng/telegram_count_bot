@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Jobs\SendRenewalReminderJob;
 use App\Models\UserSubscription;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
 
 class SendRenewalReminders extends Command
 {
@@ -14,18 +15,24 @@ class SendRenewalReminders extends Command
 
     public function handle(): int
     {
+        $total = 0;
+    
         UserSubscription::query()
             ->where('status', 'active')
             ->whereNotNull('ends_at')
-            ->whereBetween('ends_at', [now(), now()->addDays(3)]) // ← ADJUST: how early to remind
-            ->whereNull('renewal_reminded_at')                    // ← the "only once" guard
+            ->whereBetween('ends_at', [now(), now()->addDays(3)])
+            ->whereNull('renewal_reminded_at')
             ->select('userSubscriptionsID')
-            ->chunkById(100, function ($subs) {
+            ->chunkById(100, function ($subs) use (&$total) {
                 foreach ($subs as $sub) {
-                    SendRenewalReminderJob::dispatch($sub->userSubscriptionsID);
+                    $total++;
+    
+                    SendRenewalReminderJob::dispatchSync($sub->userSubscriptionsID);
                 }
             }, 'userSubscriptionsID');
-
+    
+        $this->info("Renewal reminder sent/dispatched: {$total}");
+    
         return self::SUCCESS;
     }
 }

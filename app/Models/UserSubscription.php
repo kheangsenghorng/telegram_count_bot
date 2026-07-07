@@ -67,6 +67,8 @@ class UserSubscription extends Model
         });
     }
 
+    
+
     // ── Relations ────────────────────────────────────────────────────────
 
     public function user(): BelongsTo
@@ -77,6 +79,10 @@ class UserSubscription extends Model
             'uuid'
         );
     }
+
+
+
+    
 
     public function package(): BelongsTo
     {

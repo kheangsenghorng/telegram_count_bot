@@ -42,11 +42,19 @@ class PaymentNotification extends Model
 
     public function telegramGroup(): BelongsTo
     {
-        return $this->belongsTo(TelegramGroup::class, 'telegram_group_id');
+        return $this->belongsTo(
+            TelegramGroup::class,
+            'telegram_group_id',
+            'telegramGroupsID'      // ← ADJUST to your actual PK name
+        );
     }
-
+    
     public function telegramPayment(): BelongsTo
     {
-        return $this->belongsTo(TelegramPayment::class, 'telegram_payment_id');
+        return $this->belongsTo(
+            TelegramPayment::class,
+            'telegram_payment_id',
+            'telegramPaymentsID'    // ← ADJUST to your actual PK name
+        );
     }
 }

@@ -9,8 +9,9 @@ use Illuminate\Console\Command;
 
 class RecalculatePaymentUsageCommand extends Command
 {
-    protected $signature = 'payments:recalculate-usage 
-                            {subscription_id? : Optional subscription ID}';
+    protected $signature = 'payments:recalculate-usage
+                            {subscription_id? : Optional subscription ID}
+                            {--all : Include cancelled/expired subscriptions}';
 
     protected $description = 'Recalculate subscription payment_used from saved Telegram payments';
 
@@ -19,16 +20,17 @@ class RecalculatePaymentUsageCommand extends Command
         $subscriptionId = $this->argument('subscription_id');
 
         RecalculateSubscriptionPaymentUsageJob::dispatch(
-            $subscriptionId ? (string) $subscriptionId : null
+            $subscriptionId ? (string) $subscriptionId : null,
+            includeInactive: (bool) $this->option('all'),
         );
 
         $this->info('✅ Payment usage recalculation job dispatched.');
 
-        if ($subscriptionId) {
-            $this->line("Subscription: {$subscriptionId}");
-        } else {
-            $this->line('Mode: all subscriptions');
-        }
+        $this->line($subscriptionId
+            ? "Subscription: {$subscriptionId}"
+            : ($this->option('all')
+                ? 'Mode: ALL subscriptions (including inactive)'
+                : 'Mode: active subscriptions'));
 
         return self::SUCCESS;
     }
