@@ -73,7 +73,7 @@ Schedule::command('telegram:test-schedule')
 
 Schedule::job(new SendStatsSummaryJob('day'))
     ->name('stats-summary-day')
-    ->dailyAt('22:00')
+    ->dailyAt('23:54')
     ->timezone($timezone)
     ->withoutOverlapping()
     ->onOneServer();
