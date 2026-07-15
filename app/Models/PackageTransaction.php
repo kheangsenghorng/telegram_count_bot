@@ -37,12 +37,22 @@ class PackageTransaction extends Model
         'telegram_message_id',
         'status',
         'paid_at',
+       // ── ABA PayWay (added by migration) ──────────────────────────
+       'gateway',                  // 'bakong' | 'aba_payway'
+       'merchant_ref_no',          // our PAY-... ref sent to ABA
+       'checkout_url',             // payment link URL — stored at creation
+       'aba_tran_id',              // ABA tran_id from callback
+       'create_log_id',            // PayWay create-link log ID
+       'gateway_status',           // OPEN / APPROVED / ...
+       'create_response',          // full create-link response (JSON)
+       
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'paid_at' => 'datetime',
         'expires_at' => 'datetime',
+        'create_response' => 'array',
     ];
 
     protected static function boot(): void
@@ -65,7 +75,8 @@ class PackageTransaction extends Model
             ->where('status', 'pending')
             ->where('created_at', '<', now()->subDays(7));
     }
-        public function user()
+
+    public function user()
     {
         return $this->belongsTo(User::class, 'user_id', 'uuid');
     }
@@ -88,5 +99,3 @@ class PackageTransaction extends Model
         );
     }
 }
-
-

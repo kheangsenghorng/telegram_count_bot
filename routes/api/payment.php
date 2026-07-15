@@ -1,21 +1,94 @@
 <?php
 
-use App\Http\Controllers\Api\V1\KhqrController;
+declare(strict_types=1);
+
 use App\Http\Controllers\Api\PaymentCheckoutApiController;
+use App\Http\Controllers\Api\PaymentLinkController;
+use App\Http\Controllers\Api\PayWayCallbackController;
 use Illuminate\Support\Facades\Route;
 
-Route::prefix('v1/khqr')->group(function () {
-    Route::post('/merchant', [KhqrController::class, 'generateMerchant']);
-    Route::post('/individual', [KhqrController::class, 'generateIndividual']);
-    Route::post('/generate-image', [KhqrController::class, 'generateImage']);
-    Route::post('/deeplink', [KhqrController::class, 'generateDeeplink']);
+Route::prefix('v1')
+    ->name('api.v1.')
+    ->group(function (): void {
+        /*
+        |--------------------------------------------------------------------------
+        | KHQR checkout
+        |--------------------------------------------------------------------------
+        */
 
-    Route::post('/check-transaction-by-md5', [KhqrController::class, 'checkTransactionByMd5']);
-    Route::post('/check-transaction-by-hash', [KhqrController::class, 'checkTransactionByHash']);
-    Route::post('/check-bakong-account', [KhqrController::class, 'checkBakongAccount']);
-    Route::post('/check-transaction-by-external-ref', [KhqrController::class, 'checkTransactionByExternalRef']);
+        Route::prefix('khqr')
+            ->name('khqr.')
+            ->controller(PaymentCheckoutApiController::class)
+            ->group(function (): void {
+                Route::get(
+                    '/payment-checkouts/{transactionId}',
+                    'show'
+                )->name('payment-checkouts.show');
 
+                Route::post(
+                    '/payment-checkouts/{transactionId}/check',
+                    'check'
+                )
+                    ->middleware('throttle:30,1')
+                    ->name('payment-checkouts.check');
+            });
 
-    Route::get('/payment-checkout/{transactionId}', [PaymentCheckoutApiController::class, 'show']);
-    Route::post('/payment-checkout/{transactionId}/check', [PaymentCheckoutApiController::class, 'check']);
-});
+        /*
+        |--------------------------------------------------------------------------
+        | ABA PayWay
+        |--------------------------------------------------------------------------
+        */
+
+        Route::prefix('payway')
+            ->name('payway.')
+            ->group(function (): void {
+                /*
+                |--------------------------------------------------------------------------
+                | Payment-link API
+                |--------------------------------------------------------------------------
+                */
+
+                Route::controller(PaymentLinkController::class)
+                    ->group(function (): void {
+                        Route::post(
+                            '/payment-links',
+                            'store'
+                        )->name('payment-links.store');
+
+                        Route::post(
+                            '/payment-links/detail',
+                            'details'
+                        )
+                            ->middleware('throttle:60,1')
+                            ->name('payment-links.details');
+
+                        Route::post(
+                            '/transactions/check',
+                            'checkTransaction'
+                        )
+                            ->middleware('throttle:60,1')
+                            ->name('transactions.check');
+                    });
+
+                /*
+                |--------------------------------------------------------------------------
+                | PayWay callback
+                |--------------------------------------------------------------------------
+                |
+                | ABA PayWay sends a server-to-server POST request here.
+                | This endpoint must return JSON and must not redirect.
+                |
+                | Do not place authentication middleware on this route because
+                | the request comes directly from ABA PayWay.
+                |
+                */
+
+                Route::post(
+                    '/payment-link/callback',
+                    [PayWayCallbackController::class, 'handle']
+                )
+                    ->middleware('throttle:120,1')
+                    ->name('payment-link.callback');
+            });
+    });
+
