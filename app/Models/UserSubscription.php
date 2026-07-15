@@ -34,6 +34,7 @@ class UserSubscription extends Model
         'transaction_id',
     ];
 
+
     protected $casts = [
         'override_payment_limit' => 'integer',
         'override_group_limit'   => 'integer',

@@ -38,11 +38,10 @@ class SendRenewalReminderJob implements ShouldQueue
         }
 
         // Re-check the guards — state may have changed between
-        // dispatch and execution (renewed, cancelled, already reminded).
+        // dispatch and execution (renewed, cancelled, expired).
         if (
             $sub->status !== 'active'
             || $sub->ends_at === null
-            || $sub->renewal_reminded_at !== null
             || $sub->ends_at->isPast()
         ) {
             return;
@@ -59,6 +58,31 @@ class SendRenewalReminderJob implements ShouldQueue
             $sub->forceFill(['renewal_reminded_at' => now()])->save();
 
             return;
+        }
+
+        /**
+         * ATOMIC CLAIM — must happen BEFORE sending.
+         *
+         * whereNull/orWhereRaw + update is one SQL statement, so a retry
+         * of this job (or a concurrent worker) cannot claim it twice.
+         * The orWhereRaw matches the scheduler command exactly: a reminder
+         * belonging to a previous cycle (ends_at moved forward) is stale
+         * and may be claimed again.
+         *
+         * This also fixes the double-send-on-retry bug: if we sent first
+         * and crashed before saving, the retry would send again. Claiming
+         * first means a crash after send just leaves the flag set — safe.
+         */
+        $claimed = UserSubscription::query()
+            ->where('userSubscriptionsID', $this->subscriptionId)
+            ->where(function ($q) {
+                $q->whereNull('renewal_reminded_at')
+                  ->orWhereRaw('renewal_reminded_at < DATE_SUB(ends_at, INTERVAL 3 DAY)');
+            })
+            ->update(['renewal_reminded_at' => now()]);
+
+        if ($claimed === 0) {
+            return; // already reminded for this cycle
         }
 
         $package = $sub->package;
@@ -87,19 +111,23 @@ class SendRenewalReminderJob implements ShouldQueue
             $lines[] = "➕ ការទូទាត់នៅសល់ <b>{$remainingLabel}</b> នឹងបូកបញ្ចូលទៅកញ្ចប់ថ្មី។";
         }
 
-        $keyboard = [
-            [
+        $keyboard = [];
+
+        // Only show the renew button when we actually have a package id,
+        // otherwise callback_data would be a broken 'pkg_buy_'.
+        if ($package?->packagesID) {
+            $keyboard[] = [
                 [
-                    'text'          => "🔄 បន្តកញ្ចប់ {$package?->name}",
-                    // Reuses your existing buy flow in PackageHandler
-                    'callback_data' => 'pkg_buy_' . $package?->packagesID,
+                    'text'          => "🔄 បន្តកញ្ចប់ {$package->name}",
+                    'callback_data' => 'pkg_buy_' . $package->packagesID,
                 ],
-            ],
+            ];
+        }
+
+        $keyboard[] = [
             [
-                [
-                    'text'          => '📦 មើលកញ្ចប់ផ្សេងទៀត',
-                    'callback_data' => 'pkg_show',
-                ],
+                'text'          => '📦 មើលកញ្ចប់ផ្សេងទៀត',
+                'callback_data' => 'pkg_show',
             ],
         ];
 
@@ -126,16 +154,17 @@ class SendRenewalReminderJob implements ShouldQueue
             ]
         );
 
-        // Only mark as reminded when Telegram accepted the message,
-        // so a failed send retries on the next scheduler run.
-        if (($result['ok'] ?? false) === true) {
-            $sub->forceFill(['renewal_reminded_at' => now()])->save();
-        } else {
+        if (($result['ok'] ?? false) !== true) {
             Log::warning('Renewal reminder send failed', [
                 'subscription_id' => $this->subscriptionId,
                 'chat_id'         => $chatId,
                 'result'          => $result,
             ]);
+
+            // Release the claim so the next scheduler run retries.
+            UserSubscription::query()
+                ->where('userSubscriptionsID', $this->subscriptionId)
+                ->update(['renewal_reminded_at' => null]);
         }
     }
 }

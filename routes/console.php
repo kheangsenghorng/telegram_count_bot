@@ -9,6 +9,9 @@ use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schedule;
+use App\Jobs\QueueHeartbeatJob;
+
+Schedule::job(new QueueHeartbeatJob)->everyMinute()->onOneServer();
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
@@ -140,3 +143,4 @@ Schedule::command('subscriptions:send-renewal-reminders')
     ->timezone($timezone)
     ->withoutOverlapping()
     ->onOneServer();
+    

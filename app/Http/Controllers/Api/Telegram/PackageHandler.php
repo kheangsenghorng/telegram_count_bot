@@ -6,9 +6,10 @@ namespace App\Http\Controllers\Api\Telegram;
 
 use App\Helpers\KhmerDateFormatter;
 use App\Models\Package;
+use App\Models\PackageTransaction;
 use App\Models\User;
 use App\Models\UserSubscription;
-use App\Services\Khqr\BakongService;
+use App\Services\PayWay\AbaCheckoutService;
 use App\Services\TelegramBotService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
@@ -17,10 +18,68 @@ use Throwable;
 
 class PackageHandler
 {
+    /*
+    |--------------------------------------------------------------------------
+    | Cache TTLs (seconds)
+    |--------------------------------------------------------------------------
+    */
+    private const TTL_PACKAGES     = 3600;   // 1 hour — package list (invalidated on admin edit)
+    private const TTL_PACKAGE_ROW  = 300;    // 5 min  — single package on the buy path (fresher for status changes)
+    private const TTL_USER_MAP     = 86400;  // 1 day  — telegram_id → user uuid (never really changes)
+    private const TTL_SUBSCRIPTION = 300;    // 5 min  — active subscription
+
     public function __construct(
         protected TelegramBotService $telegram,
-        protected BakongService $payments,
+        protected AbaCheckoutService $payments,
     ) {}
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cache keys + invalidation (call these from admin panel / activation)
+    |--------------------------------------------------------------------------
+    */
+
+    public static function packagesListKey(): string
+    {
+        return 'pkg:list';
+    }
+
+    public static function packageKey(string $packagesID): string
+    {
+        return "pkg:row:{$packagesID}";
+    }
+
+    public static function userMapKey(string $chatId): string
+    {
+        return "pkg:usermap:{$chatId}";
+    }
+
+    public static function subscriptionKey(string $userUuid): string
+    {
+        return "pkg:sub:{$userUuid}";
+    }
+
+    /**
+     * Call when a package is created/edited/deleted in the admin panel.
+     */
+    public static function invalidatePackages(?string $packagesID = null): void
+    {
+        Cache::forget(self::packagesListKey());
+
+        if ($packagesID !== null) {
+            Cache::forget(self::packageKey($packagesID));
+        }
+    }
+
+    /**
+     * Call from PaymentConfirmationService::activatePackage() after a
+     * subscription is created/updated, so the header + carry-over preview
+     * refresh instantly instead of after 5 minutes.
+     */
+    public static function invalidateSubscription(string $userUuid): void
+    {
+        Cache::forget(self::subscriptionKey($userUuid));
+    }
 
     private function escapeMarkdown(?string $text): string
     {
@@ -39,7 +98,6 @@ class PackageHandler
             default    => (string) $billingCycle,
         };
     }
-    
 
     private function formatPrice(float|int|string|null $price): string
     {
@@ -55,19 +113,62 @@ class PackageHandler
         return $packageId;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Cached lookups
+    |--------------------------------------------------------------------------
+    */
+
+    private function getPackages()
+    {
+        return Cache::remember(
+            self::packagesListKey(),
+            self::TTL_PACKAGES,
+            fn () => Package::query()
+                ->orderBy('price')
+                ->get()
+        );
+    }
+
+    private function getPackage(string $packagesID): ?Package
+    {
+        return Cache::remember(
+            self::packageKey($packagesID),
+            self::TTL_PACKAGE_ROW,
+            fn () => Package::where('packagesID', $packagesID)->first()
+        );
+    }
+
     /**
      * Current active subscription for a Telegram chat/user id.
+     * Two-level cache: telegram_id → uuid (1 day), uuid → subscription (5 min).
      * Returns null when the user or subscription doesn't exist.
      */
     private function activeSubscriptionForChat(string $chatId): ?UserSubscription
     {
-        $user = User::where('telegram_id', (int) $chatId)->first(); // ← ADJUST column name if different
+        $userUuid = Cache::remember(
+            self::userMapKey($chatId),
+            self::TTL_USER_MAP,
+            function () use ($chatId): ?string {
+                $user = User::where('telegram_id', (int) $chatId)->first(); // ← ADJUST column name if different
 
-        if (! $user) {
+                return $user ? (string) $user->uuid : null;
+            }
+        );
+
+        if ($userUuid === null) {
+            // Don't let "user not found" stick for a day — a brand-new user
+            // would otherwise be invisible until the key expires.
+            Cache::forget(self::userMapKey($chatId));
+
             return null;
         }
 
-        return UserSubscription::activeFor((string) $user->uuid);
+        return Cache::remember(
+            self::subscriptionKey($userUuid),
+            self::TTL_SUBSCRIPTION,
+            fn () => UserSubscription::activeFor($userUuid)
+        );
     }
 
     public function showPackages(string $chatId, string $chatType): JsonResponse
@@ -89,9 +190,7 @@ class PackageHandler
             return response()->json(['ok' => true]);
         }
 
-        $packages = Package::query()
-            ->orderBy('price')
-            ->get();
+        $packages = $this->getPackages();
 
         if ($packages->isEmpty()) {
             $this->telegram->sendMessage(
@@ -226,79 +325,103 @@ class PackageHandler
         string $chatType
     ): void {
         $packageId = $this->normalizePackageId($packageId);
-
+ 
         if ($chatType !== 'private') {
             $this->telegram->editMessage(
                 $chatId,
                 $messageId,
                 '🔒 សូមបើក Bot ក្នុង Private Chat ដើម្បីទិញកញ្ចប់។'
             );
-
+ 
             return;
         }
-
+ 
         // Atomic lock — see showPackages()
         $lockKey = "pkg_buy_{$chatId}_{$packageId}";
-
+ 
         if (! Cache::add($lockKey, true, now()->addSeconds(5))) {
             return;
         }
-
-        $package = Package::where('packagesID', $packageId)->first();
-
+ 
+        $package = $this->getPackage($packageId);
+ 
         if (! $package) {
             $this->telegram->editMessage(
                 $chatId,
                 $messageId,
                 '❌ កញ្ចប់នេះមិនមានទេ។'
             );
-
+ 
             return;
         }
-
+ 
         if ($package->status !== 'active') {
             $this->telegram->editMessage(
                 $chatId,
                 $messageId,
                 '🔴 កញ្ចប់នេះមិនអាចទិញបានទេ។ សូមជ្រើសរើសកញ្ចប់ផ្សេង។'
             );
-
+ 
             return;
         }
-
-        // Show "typing…" while Bakong creates the checkout (can take a moment)
+ 
+        // Show "typing…" while ABA creates the payment link (can take a moment)
         $this->telegram->sendChatAction($chatId);
-
+ 
         try {
-            $payment = $this->payments->createCheckout(
-                package: $package,
-                telegramUserId: (int) $chatId,
-                requestedBy: $requestedBy,
-            );
+            // ── Reuse an existing pending, unexpired link for this
+            //    chat + package. Prevents duplicate ABA payment links
+            //    when the user taps Buy twice. The stored checkout_url
+            //    is always used — never regenerated.
+            $payment = PackageTransaction::query()
+                ->where('telegram_chat_id', (string) $chatId)
+                ->where('package_id', $package->packagesID)
+                ->where('gateway', 'aba_payway')
+                ->where('status', 'pending')
+                ->where('expires_at', '>', now()->addMinutes(2)) // ≥2 min left, or make a fresh one
+                ->whereNotNull('checkout_url')
+                ->latest('created_at')
+                ->first();
+ 
+            if (! $payment) {
+                // WRITE path — always hits DB/ABA directly, never cached.
+                $payment = $this->payments->createCheckout(
+                    package: $package,
+                    telegramUserId: $chatId,
+                    requestedBy: $requestedBy,
+                    telegramChatId: $chatId,
+                    telegramMessageId: $messageId,
+                );
+            }
+ 
             $payment->forceFill([
                 'telegram_chat_id'    => (string) $chatId,
                 'telegram_message_id' => $messageId,
             ])->save();
-
+ 
             $payUrl = $this->payments->checkoutUrl($payment);
-
+ 
             if (empty($payUrl)) {
                 throw new \RuntimeException('Checkout URL is empty.');
             }
-
+ 
             if (! str_starts_with($payUrl, 'https://')) {
                 Log::warning('Telegram payment URL is not HTTPS', [
                     'pay_url' => $payUrl,
                 ]);
             }
         } catch (Throwable $e) {
-            Log::error('Bakong checkout failed', [
+            // Let the user retry immediately — don't hold the lock
+            // for the remaining seconds after a failure.
+            Cache::forget($lockKey);
+ 
+            Log::error('ABA PayWay checkout failed', [
                 'package_id'   => $packageId,
                 'chat_id'      => $chatId,
                 'requested_by' => $requestedBy,
                 'error'        => $e->getMessage(),
             ]);
-
+ 
             $this->telegram->editMessage(
                 $chatId,
                 $messageId,
@@ -307,17 +430,17 @@ class PackageHandler
                     'សូមព្យាយាមម្ដងទៀត ឬទំនាក់ទំនង Admin។',
                 ])
             );
-
+ 
             return;
         }
-
+ 
         $supportRaw = (string) config('services.telegram.support_username');
-
+ 
         $name  = $this->escapeMarkdown($package->name);
         $buyer = $this->escapeMarkdown($requestedBy);
         $price = $this->formatPrice($package->price);
         $cycle = $this->cycleLabel($package->billing_cycle);
-
+ 
         $lines = [
             "🛒 *បញ្ជាក់ការទិញ*",
             "─────────────────────",
@@ -326,45 +449,53 @@ class PackageHandler
             "📅 រយៈពេល: {$cycle}",
             "👤 អ្នកទិញ: {$buyer}",
         ];
-
+ 
         // ── Carry-over preview on the confirmation message ───────────────
         $currentSub = $this->activeSubscriptionForChat($chatId);
         $carryOver  = $currentSub?->remainingPayments() ?? 0;
-
+ 
         $isUnlimited = method_exists($package, 'isUnlimitedPayments')
             && $package->isUnlimitedPayments();
-
+ 
         if (! $isUnlimited && $carryOver > 0) {
             $total = (int) $package->payment_limit + $carryOver;
-
+ 
             $totalKh = KhmerDateFormatter::formatNumber($total);
             $baseKh  = KhmerDateFormatter::formatNumber((int) $package->payment_limit);
             $carryKh = KhmerDateFormatter::formatNumber($carryOver);
-
+ 
             $lines[] = "➕ នៅសល់ពីកញ្ចប់ចាស់: {$carryKh}";
             $lines[] = "🧮 សរុបក្រោយបង់ប្រាក់: *{$totalKh}* ({$baseKh} + {$carryKh})";
         }
-
-        if (! empty($payment->external_transaction_id)) {
-            $invoice = $this->escapeMarkdown($payment->external_transaction_id);
+ 
+        if (! empty($payment->merchant_ref_no)) {
+            $invoice = $this->escapeMarkdown($payment->merchant_ref_no);
             $lines[] = "🧾 លេខវិក្កយបត្រ: `{$invoice}`";
         }
-
+ 
+        // ── Remaining validity: from the stored expires_at when reusing
+        //    a link, otherwise the configured lifetime.
+        $minutesLeft = $payment->expires_at
+            ? max(1, (int) now()->diffInMinutes($payment->expires_at, false))
+            : (int) config('payway.payment_link_lifetime_minutes', 30);
+ 
+        $ttlKh = KhmerDateFormatter::formatNumber($minutesLeft);
+ 
         $lines[] = "─────────────────────";
-        $lines[] = "👇 ចុចប៊ូតុង *បង់ប្រាក់* ដើម្បីបើកទំព័រ KHQR។";
-        $lines[] = "⏳ QR មានសុពលភាព ១៥ នាទី។";
-
+        $lines[] = "👇 ចុចប៊ូតុង *បង់ប្រាក់* ដើម្បីបើកទំព័រ ABA PayWay។";
+        $lines[] = "⏳ តំណបង់ប្រាក់មានសុពលភាព {$ttlKh} នាទី។";
+ 
         $text = implode("\n", $lines);
-
+ 
         $keyboard = [
             [
                 [
-                    'text' => '💳 បង់ប្រាក់ឥឡូវនេះ',
+                    'text' => '💳 បង់ប្រាក់តាម ABA',
                     'url'  => $payUrl,
                 ],
             ],
         ];
-
+ 
         if ($supportRaw !== '') {
             $keyboard[] = [
                 [
@@ -373,7 +504,7 @@ class PackageHandler
                 ],
             ];
         }
-
+ 
         $this->telegram->editMessage(
             $chatId,
             $messageId,

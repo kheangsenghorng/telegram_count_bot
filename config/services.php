@@ -36,6 +36,7 @@ return [
     ],
     'telegram' => [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
+        'bot_username' => env('TELEGRAM_BOT_USERNAME', 'posShope_bot'),
         'api_id'    => env('TELEGRAM_API_ID'),
         'api_hash'  => env('TELEGRAM_API_HASH'),
 
@@ -44,19 +45,6 @@ return [
         'support_hours'    => env('TELEGRAM_SUPPORT_HOURS', 'Mon-Fri 8:00 - 17:00'),
         'test_chat_id' => env('TELEGRAM_TEST_CHAT_ID'),
         'renewal_reminder_time' => env('RENEWAL_REMINDER_TIME', '09:00'),
-    ],
-    'bakong_gateway' => [
-        'url' => env('BAKONG_GATEWAY_URL'),
-        'api_key' => env('BAKONG_GATEWAY_API_KEY'),
-        'token' => env('BAKONG_GATEWAY_TOKEN'),
-    ],
-
-    'bakong' => [
-        'account_id' => env('BAKONG_ACCOUNT_ID'),
-        'merchant_id' => env('BAKONG_MERCHANT_ID'),
-        'acquiring_bank' => env('BAKONG_ACQUIRING_BANK'),
-        'merchant_name' => env('BAKONG_MERCHANT_NAME', 'CHEN KHEANG'),
-        'merchant_city' => env('BAKONG_MERCHANT_CITY', 'Phnom Penh'),
     ],
     'frontend' => [
         'url' => env('FRONTEND_URL', 'http://localhost:3000'),

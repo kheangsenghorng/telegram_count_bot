@@ -127,16 +127,40 @@ class TelegramWebhookController extends Controller
             ]);
         }
 
-        /*
+       /*
         |--------------------------------------------------------------------------
         | Commands
         |--------------------------------------------------------------------------
         */
+
+        /*
+         * Deep-link add-to-group button:
+         *   https://t.me/sumpayment_bot?startgroup=connect
+         * arrives as "/start connect" or "/start@sumpayment_bot connect"
+         * in the group. Route it to the same handler as /connect.
+         *
+         * Must be checked BEFORE the plain /start branch, otherwise it
+         * falls into accountHandler->start() and the group is never
+         * registered. Group chats only — a private "/start connect"
+         * should behave like a normal /start.
+         */
+        if (
+            in_array($chatType, ['group', 'supergroup'], true)
+            && preg_match('/^\/start(?:@\w+)?\s+connect\b/i', $text)
+        ) {
+            /*
+             * Rewrite the text so groupHandler->connect() sees the
+             * exact same input as a typed "/connect" (no key —
+             * falls back to the user's active subscription).
+             */
+            return $this->groupHandler->connect($chat, $from, '/connect');
+        }
+
         if (str_starts_with($text, '/start')) {
             if ($this->subscriptionLink->handleGroupStart($message)) {
                 return response()->json(['ok' => true]);
             }
-        
+
             return $this->accountHandler->start($chat, $from, $text);   // ← pass $text
         }
 
@@ -164,13 +188,15 @@ class TelegramWebhookController extends Controller
 
             '💬 Support' => $this->supportHandler->showContact($chatId),
 
-            '🔒 Privacy Policy' => $this->reply($chatId, 'https://yourdomain.com/privacy'),
+           '🔒 Privacy Policy' =>$this->accountHandler->showPrivacyPolicy($chatId),
 
             '📜 Terms of Service' => $this->reply($chatId, 'https://yourdomain.com/terms'),
 
             default => response()->json(['ok' => true]),
         };
     }
+
+    
 
     private function extractText(array $message): string
     {
@@ -363,4 +389,6 @@ class TelegramWebhookController extends Controller
             '✅ Telegram Bot Test Success from Laravel'
         );
     }
+
+    
 }

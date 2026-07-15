@@ -22,3 +22,5 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+payway_key*.pem
+storage/app/payway/*.pem
