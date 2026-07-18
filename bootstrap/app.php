@@ -17,6 +17,18 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    ->withBroadcasting(
+        __DIR__.'/../routes/channels.php',
+        /*
+        |--------------------------------------------------------------------------
+        | Broadcasting auth
+        |--------------------------------------------------------------------------
+        |
+        | This app uses JWT (guard: api), NOT Sanctum — same guard as the
+        | protected API routes, so the frontend's Bearer JWT works here.
+        */
+        ['prefix' => '', 'middleware' => ['auth:api']],
+    )
     ->withMiddleware(function (Middleware $middleware): void {
         /*
         |--------------------------------------------------------------------------

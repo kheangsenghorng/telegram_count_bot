@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use App\Events\TelegramGroupStatusUpdated;
 
 class LimitHandler
 {
@@ -541,144 +542,393 @@ class LimitHandler
         }
     }
 
-    public function removeGroup(string $chatId, string $telegramGroupsID, array $from): JsonResponse
-    {
+    public function removeGroup(
+        string $chatId,
+        string $telegramGroupsID,
+        array $from
+    ): JsonResponse {
         try {
-            // Write path: ALWAYS read fresh from DB, never from cache.
+            /*
+            |--------------------------------------------------------------------------
+            | Always read fresh data for write operations
+            |--------------------------------------------------------------------------
+            */
             $group = TelegramGroup::query()
                 ->where('telegramGroupsID', $telegramGroupsID)
                 ->where('status', 'connected')
                 ->first();
-
+    
             if (! $group) {
-                $this->telegram->sendMessage($chatId,
+                $this->telegram->sendMessage(
+                    $chatId,
                     "⚠️ <b>Group not found</b>\n\n"
-                    . "This group may already be removed.",
-                    ['parse_mode' => 'HTML']
+                    . 'This group may already be removed.',
+                    [
+                        'parse_mode' => 'HTML',
+                    ]
                 );
-
-                return response()->json(['ok' => true]);
+    
+                return response()->json([
+                    'ok' => true,
+                ]);
             }
-
+    
             /*
             |--------------------------------------------------------------------------
-            | FIX #3 — Ownership check
+            | Ownership check
             |--------------------------------------------------------------------------
-            |
-            | The Remove button is visible to every member of a group
-            | chat, and callback_data can be crafted with any group ID.
-            | Only the group's owner may disconnect it.
             */
-
             $requesterUuid = $this->resolveUserId(
                 (string) ($from['id'] ?? '')
             );
-
+    
             if (
                 $requesterUuid === null
                 || $requesterUuid !== (string) $group->user_id
             ) {
-                Log::warning('Unauthorized group removal attempt', [
-                    'chat_id' => $chatId,
-                    'telegram_group_id' => $telegramGroupsID,
-                    'owner_user_id' => $group->user_id,
-                    'requested_by' => $from['id'] ?? null,
-                ]);
-
-                $this->telegram->sendMessage($chatId,
-                    "⚠️ អ្នកមិនមានសិទ្ធិលុប group នេះទេ។\n"
-                    . "មានតែម្ចាស់ package ប៉ុណ្ណោះដែលអាចលុបបាន។"
+                Log::warning(
+                    'Unauthorized group removal attempt',
+                    [
+                        'chat_id' => $chatId,
+                        'telegram_group_id' => $telegramGroupsID,
+                        'owner_user_id' => $group->user_id,
+                        'requested_by' => $from['id'] ?? null,
+                    ]
                 );
-
-                return response()->json(['ok' => true]);
+    
+                $this->telegram->sendMessage(
+                    $chatId,
+                    "⚠️ អ្នកមិនមានសិទ្ធិលុប group នេះទេ។\n"
+                    . 'មានតែម្ចាស់ package ប៉ុណ្ណោះដែលអាចលុបបាន។'
+                );
+    
+                return response()->json([
+                    'ok' => true,
+                ]);
             }
-
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Use the subscription attached to this group
+            |--------------------------------------------------------------------------
+            |
+            | This is safer than loading the user's latest subscription because
+            | the group could belong to another subscription.
+            |
+            */
             $subscription = UserSubscription::query()
-                ->where('user_id', $group->user_id)
-                ->where('status', 'active')
-                ->latest('starts_at')
+                ->where(
+                    'userSubscriptionsID',
+                    $group->subscription_id
+                )
                 ->first();
-
-            $groupName = e(
+    
+            $rawGroupName =
                 $group->group_name
                 ?? $group->title
                 ?? $group->name
-                ?? 'Unknown Group'
-            );
-
-            DB::transaction(function () use ($subscription, $telegramGroupsID) {
-                TelegramGroup::query()
-                    ->where('telegramGroupsID', $telegramGroupsID)
-                    ->where('status', 'connected')
-                    ->update([
-                        'status' => 'disconnected',
-                        'updated_at' => now(),
-                    ]);
-
-                if ($subscription && (int) $subscription->group_used > 0) {
-                    UserSubscription::query()
-                        ->where('userSubscriptionsID', $subscription->userSubscriptionsID)
-                        ->decrement('group_used');
-                }
-            });
-
+                ?? 'Unknown Group';
+    
+            $groupName = e($rawGroupName);
+    
             /*
             |--------------------------------------------------------------------------
-            | Cache invalidation — data changed, bust everything for this user
+            | Disconnect group
             |--------------------------------------------------------------------------
             */
-            self::invalidateForUser((string) $group->user_id);
-
-            Log::info('Telegram group removed by user', [
-                'chat_id' => $chatId,
-                'telegram_group_id' => $telegramGroupsID,
-                'user_id' => $group->user_id,
-                'subscription_id' => $subscription->userSubscriptionsID ?? null,
-                'removed_by' => $from['id'] ?? null,
-            ]);
-
-            $this->telegram->sendMessage($chatId,
+            $wasDisconnected = DB::transaction(
+                function () use (
+                    $group,
+                    $subscription
+                ): bool {
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Conditional update prevents double decrement
+                    |--------------------------------------------------------------------------
+                    |
+                    | If two remove requests arrive together, only the first request
+                    | can change connected → disconnected.
+                    |
+                    */
+                    $updated = TelegramGroup::query()
+                        ->where(
+                            'telegramGroupsID',
+                            $group->telegramGroupsID
+                        )
+                        ->where(
+                            'status',
+                            'connected'
+                        )
+                        ->update([
+                            'status' => 'disconnected',
+    
+                            'connection_status' =>
+                                'offline',
+    
+                            'activity_status' =>
+                                'inactive',
+    
+                            /*
+                            |--------------------------------------------------------------------------
+                            | Keep last_activity_at for history.
+                            | Heartbeat becomes null because the connection is removed.
+                            |--------------------------------------------------------------------------
+                            */
+                            'last_heartbeat_at' =>
+                                null,
+    
+                            'updated_at' =>
+                                now(),
+                        ]);
+    
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Another request already disconnected it
+                    |--------------------------------------------------------------------------
+                    */
+                    if ($updated === 0) {
+                        return false;
+                    }
+    
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Decrement usage safely
+                    |--------------------------------------------------------------------------
+                    */
+                    if ($subscription) {
+                        UserSubscription::query()
+                            ->where(
+                                'userSubscriptionsID',
+                                $subscription->userSubscriptionsID
+                            )
+                            ->where(
+                                'group_used',
+                                '>',
+                                0
+                            )
+                            ->decrement('group_used');
+                    }
+    
+                    return true;
+                }
+            );
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Group was already disconnected by another request
+            |--------------------------------------------------------------------------
+            */
+            if (! $wasDisconnected) {
+                return response()->json([
+                    'ok' => true,
+                ]);
+            }
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Reload updated status
+            |--------------------------------------------------------------------------
+            */
+            $group->refresh();
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Invalidate cached data
+            |--------------------------------------------------------------------------
+            */
+            self::invalidateForUser(
+                (string) $group->user_id
+            );
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Realtime Reverb broadcast
+            |--------------------------------------------------------------------------
+            */
+            $this->broadcastGroupStatus($group);
+    
+            Log::info(
+                'Telegram group removed by user',
+                [
+                    'chat_id' => $chatId,
+    
+                    'telegram_group_id' =>
+                        $telegramGroupsID,
+    
+                    'telegram_chat_id' =>
+                        $group->group_id,
+    
+                    'user_id' =>
+                        $group->user_id,
+    
+                    'subscription_id' =>
+                        $subscription
+                            ?->userSubscriptionsID,
+    
+                    'connection_status' =>
+                        $group->connection_status,
+    
+                    'activity_status' =>
+                        $group->activity_status,
+    
+                    'removed_by' =>
+                        $from['id'] ?? null,
+                ]
+            );
+    
+            /*
+            |--------------------------------------------------------------------------
+            | Telegram response
+            |--------------------------------------------------------------------------
+            */
+            $this->telegram->sendMessage(
+                $chatId,
                 "✅ <b>Group Disconnected</b>\n\n"
                 . "👥 Group: <b>{$groupName}</b>\n"
-                . "This group has been disconnected from your package.",
+                . 'This group has been disconnected from your package.',
                 [
                     'parse_mode' => 'HTML',
+    
                     'reply_markup' => [
                         'inline_keyboard' => [
                             [
                                 [
-                                    'text' => '👥 មើលក្រុមរបស់ខ្ញុំ',
-                                    'callback_data' => BotCallback::MY_GROUPS,
+                                    'text' =>
+                                        '👥 មើលក្រុមរបស់ខ្ញុំ',
+    
+                                    'callback_data' =>
+                                        BotCallback::MY_GROUPS,
                                 ],
                             ],
                             [
                                 [
-                                    'text' => '📊 ត្រឡប់ទៅ My Limits',
-                                    'callback_data' => BotCallback::MY_LIMITS,
+                                    'text' =>
+                                        '📊 ត្រឡប់ទៅ My Limits',
+    
+                                    'callback_data' =>
+                                        BotCallback::MY_LIMITS,
                                 ],
                             ],
                         ],
                     ],
                 ]
             );
-
-            return response()->json(['ok' => true]);
-
-        } catch (\Throwable $e) {
-            Log::error('Remove group error', [
-                'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
-                'telegram_group_id' => $telegramGroupsID,
-                'trace' => $e->getTraceAsString(),
+    
+            return response()->json([
+                'ok' => true,
             ]);
-
+        } catch (\Throwable $e) {
+            Log::error(
+                'Remove group error',
+                [
+                    'message' =>
+                        $e->getMessage(),
+    
+                    'file' =>
+                        $e->getFile(),
+    
+                    'line' =>
+                        $e->getLine(),
+    
+                    'telegram_group_id' =>
+                        $telegramGroupsID,
+    
+                    'trace' =>
+                        $e->getTraceAsString(),
+                ]
+            );
+    
             $this->telegram->sendMessage(
                 $chatId,
-                "⚠️ Cannot remove group now.\nPlease contact support."
+                "⚠️ Cannot remove group now.\n"
+                . 'Please contact support.'
             );
-
-            return response()->json(['ok' => false]);
+    
+            return response()->json([
+                'ok' => false,
+            ]);
         }
+    }
+    private function broadcastGroupStatus(
+        TelegramGroup $group
+    ): void {
+        /*
+        |--------------------------------------------------------------------------
+        | Base query
+        |--------------------------------------------------------------------------
+        |
+        | Only currently connected groups are included in the system summary.
+        | Disconnected historical groups are not counted as offline system groups.
+        |
+        */
+        $connectedGroups = TelegramGroup::query()
+            ->where('status', 'connected');
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Current system counts
+        |--------------------------------------------------------------------------
+        */
+        $totalGroups = (clone $connectedGroups)
+            ->count();
+    
+        $onlineGroups = (clone $connectedGroups)
+            ->where(
+                'connection_status',
+                'online'
+            )
+            ->count();
+    
+        $offlineGroups = (clone $connectedGroups)
+            ->where(
+                'connection_status',
+                'offline'
+            )
+            ->count();
+    
+        $activeGroups = (clone $connectedGroups)
+            ->where(
+                'activity_status',
+                'active'
+            )
+            ->count();
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Broadcast realtime update
+        |--------------------------------------------------------------------------
+        */
+        TelegramGroupStatusUpdated::dispatch(
+            groupId:
+                (string) $group->group_id,
+    
+            groupName:
+                $group->group_name
+                ?? 'Unknown Group',
+    
+            connectionStatus:
+                $group->connection_status
+                ?? 'offline',
+    
+            activityStatus:
+                $group->activity_status
+                ?? 'inactive',
+    
+            lastActivityAt:
+                $group->last_activity_at
+                    ?->toIso8601String(),
+    
+            totalGroups:
+                $totalGroups,
+    
+            onlineGroups:
+                $onlineGroups,
+    
+            offlineGroups:
+                $offlineGroups,
+    
+            activeGroups:
+                $activeGroups,
+        );
     }
 }

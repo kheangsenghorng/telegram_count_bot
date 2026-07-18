@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Services\AbaPaymentService;
+use danog\MadelineProto\EventHandler\Attributes\Cron;
 use danog\MadelineProto\EventHandler\Attributes\Handler;
 use danog\MadelineProto\EventHandler\Message;
 use danog\MadelineProto\EventHandler\Message\GroupMessage;
 use danog\MadelineProto\EventHandler\Message\PrivateMessage;
 use danog\MadelineProto\SimpleEventHandler;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 final class AbaTelegramHandler extends SimpleEventHandler
@@ -20,9 +22,38 @@ final class AbaTelegramHandler extends SimpleEventHandler
     {
         $this->paymentService = app(AbaPaymentService::class);
 
+        // Beat immediately so the dashboard goes green on boot,
+        // before the first 30s Cron tick fires.
+        $this->writeHeartbeat();
+
         Log::info('✅ AbaTelegramHandler started');
 
         echo "✅ Listening for ABA payments...\n";
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Liveness heartbeat — every 30s
+    |--------------------------------------------------------------------------
+    | Read by SystemStatusController (max age 90s). TTL 300s so a dead
+    | process goes stale, then the key expires entirely.
+    */
+    #[Cron(period: 30.0)]
+    public function heartbeat(): void
+    {
+        $this->writeHeartbeat();
+    }
+
+    private function writeHeartbeat(): void
+    {
+        try {
+            Cache::put('heartbeat:telegram_listener', now()->timestamp, 300);
+        } catch (\Throwable $e) {
+            // Never let a cache hiccup kill the listener loop.
+            Log::warning('Listener heartbeat write failed', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     #[Handler]

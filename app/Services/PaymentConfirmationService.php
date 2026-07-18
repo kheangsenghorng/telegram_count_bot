@@ -20,9 +20,15 @@ final class PaymentConfirmationService
     /**
      * Activate a paid package transaction.
      *
-     * This method is idempotent:
-     * repeated callbacks return the existing subscription instead of
-     * creating another subscription for the same transaction.
+     * Business rule:
+     *
+     * - One user keeps one UserSubscription row.
+     * - Every purchase remains stored in PackageTransaction.
+     * - Buying another package updates the existing subscription.
+     * - Remaining payment quota is carried over when the old
+     *   subscription is still active.
+     * - The subscription ID never changes, so existing Telegram
+     *   groups remain connected.
      */
     public function activateFromPackageTransaction(
         PackageTransaction $transaction
@@ -34,7 +40,6 @@ final class PaymentConfirmationService
                 | Lock and reload transaction
                 |--------------------------------------------------------------------------
                 */
-
                 $transaction = PackageTransaction::query()
                     ->whereKey($transaction->getKey())
                     ->lockForUpdate()
@@ -51,11 +56,13 @@ final class PaymentConfirmationService
                 | Validate payment status
                 |--------------------------------------------------------------------------
                 */
-
                 if (
                     ! in_array(
                         (string) $transaction->status,
-                        ['paid', 'completed'],
+                        [
+                            'paid',
+                            'completed',
+                        ],
                         true
                     )
                 ) {
@@ -70,12 +77,19 @@ final class PaymentConfirmationService
 
                 /*
                 |--------------------------------------------------------------------------
-                | Return already attached subscription
+                | Idempotency
                 |--------------------------------------------------------------------------
+                |
+                | If this transaction was already activated, simply return
+                | the subscription linked to this transaction.
+                |
+                | This protects against duplicate PayWay callbacks.
+                |
                 */
-
-                $attachedSubscription =
-                    $this->findAttachedSubscription($transaction);
+                $attachedSubscription = $this
+                    ->findAttachedSubscription(
+                        $transaction
+                    );
 
                 if ($attachedSubscription) {
                     return $attachedSubscription;
@@ -83,128 +97,193 @@ final class PaymentConfirmationService
 
                 /*
                 |--------------------------------------------------------------------------
-                | Prevent duplicate activation by transaction ID
+                | Resolve user and purchased package
                 |--------------------------------------------------------------------------
                 */
+                $user = $this->resolveUser(
+                    $transaction
+                );
 
-                $existingSubscription =
-                    UserSubscription::query()
-                        ->where(
-                            'transaction_id',
-                            (string) $transaction->getKey()
-                        )
-                        ->lockForUpdate()
-                        ->first();
+                $package = $this->resolvePackage(
+                    $transaction
+                );
 
-                if ($existingSubscription) {
-                    $transaction->forceFill([
-                        'subscription_id' =>
-                            $existingSubscription->userSubscriptionsID,
-                    ])->save();
+                /*
+                |--------------------------------------------------------------------------
+                | Find the user's subscription row
+                |--------------------------------------------------------------------------
+                |
+                | IMPORTANT:
+                |
+                | Do NOT filter only active subscriptions here.
+                |
+                | Even when the previous subscription is expired, we want
+                | to reuse the same database row instead of creating
+                | another UserSubscription record.
+                |
+                */
+                $subscription = $this->findSubscriptionForUser(
+                    (string) $user->uuid
+                );
 
-                    return $existingSubscription;
+                /*
+                |--------------------------------------------------------------------------
+                | Calculate payment carry-over
+                |--------------------------------------------------------------------------
+                |
+                | Only carry unused payments when the current subscription
+                | is still active.
+                |
+                | Example:
+                |
+                | Current remaining: 7,000
+                | New package limit:    500
+                |
+                | New total limit:    7,500
+                |
+                */
+                $paymentCarryOver = 0;
+
+                if (
+                    $subscription
+                    && $subscription->isActive()
+                ) {
+                    $paymentCarryOver =
+                        $subscription->carryOverPayments();
                 }
 
                 /*
                 |--------------------------------------------------------------------------
-                | Resolve user and package
+                | Keep existing group usage
                 |--------------------------------------------------------------------------
+                |
+                | Because the subscription ID stays the same, existing
+                | Telegram groups can continue using this subscription.
+                |
                 */
-
-                $user = $this->resolveUser($transaction);
-                $package = $this->resolvePackage($transaction);
+                $groupsAlreadyUsed = $subscription
+                    ? $subscription->carryOverGroupsUsed()
+                    : 0;
 
                 /*
                 |--------------------------------------------------------------------------
-                | Find current active subscription
+                | Calculate effective payment limit
                 |--------------------------------------------------------------------------
                 */
-
-                $currentSubscription =
-                    $this->findCurrentSubscription(
-                        (string) $user->uuid
-                    );
-
-                /*
-                |--------------------------------------------------------------------------
-                | Carry-over rules
-                |--------------------------------------------------------------------------
-                |
-                | Payments:
-                | Add remaining payments from the old subscription to the
-                | new package limit.
-                |
-                | Groups:
-                | Do not add remaining group quota. Keep the number of
-                | groups already being used.
-                |
-                */
-
-                $paymentCarryOver =
-                    $currentSubscription?->carryOverPayments()
-                    ?? 0;
-
-                $groupsAlreadyUsed =
-                    $currentSubscription?->carryOverGroupsUsed()
-                    ?? 0;
-
                 $overridePaymentLimit =
                     $this->calculatePaymentLimit(
                         package: $package,
-                        carryOver: $paymentCarryOver,
+                        carryOver: $paymentCarryOver
                     );
 
                 /*
-                 * NOTE — business decision, currently option (a):
-                 *
-                 * (a) throw: activation is blocked when the new package
-                 *     allows fewer groups than the user already has
-                 *     connected. The callback then returns 502 and ABA
-                 *     retries — but the state can never repair itself,
-                 *     so the payment stays taken without activation.
-                 *     The bot's packages menu should hide packages with
-                 *     group_limit < connected groups to prevent this.
-                 *
-                 * (b) allow + over-limit: activate anyway with
-                 *     group_used > group_limit. LimitHandler already
-                 *     shows the over-limit warning, and new /connect
-                 *     attempts are blocked until the user removes
-                 *     groups. To switch, replace the call below with a
-                 *     Log::warning.
-                 */
-                $this->ensureGroupLimitSupportsExistingGroups(
+                |--------------------------------------------------------------------------
+                | Warn when existing groups exceed new package limit
+                |--------------------------------------------------------------------------
+                |
+                | Do not fail activation after the customer has already paid.
+                |
+                | Example:
+                |
+                | Current connected groups = 10
+                | New package limit        = 5
+                |
+                | The subscription is still activated, but no additional
+                | groups should be allowed until usage is within the limit.
+                |
+                */
+                $this->warnIfGroupLimitExceeded(
                     package: $package,
                     groupsAlreadyUsed: $groupsAlreadyUsed,
+                    userUuid: (string) $user->uuid
                 );
 
                 /*
                 |--------------------------------------------------------------------------
-                | Calculate subscription dates
+                | Calculate new subscription dates
                 |--------------------------------------------------------------------------
+                |
+                | Every successful purchase starts a new package period.
+                |
                 */
-
                 $startsAt = now();
 
                 $endsAt = $this->calculateEndDate(
                     startsAt: $startsAt,
-                    billingCycle:
-                        (string) $package->billing_cycle,
+                    billingCycle: (string) $package->billing_cycle
                 );
 
                 /*
                 |--------------------------------------------------------------------------
-                | Create subscription
+                | Create first subscription
                 |--------------------------------------------------------------------------
+                |
+                | Only happens when the user has never had a subscription.
+                |
                 */
+                if (! $subscription) {
+                    $subscription = UserSubscription::query()
+                        ->create([
+                            'user_id' =>
+                                $user->uuid,
 
-                $subscription =
-                    UserSubscription::query()->create([
-                        'user_id' =>
-                            $user->uuid,
+                            'package_id' =>
+                                $package->packagesID,
 
+                            'transaction_id' =>
+                                (string) $transaction->getKey(),
+
+                            'payment_method' =>
+                                $transaction->payment_method
+                                ?: 'aba_payway',
+
+                            'status' =>
+                                'active',
+
+                            'starts_at' =>
+                                $startsAt,
+
+                            'ends_at' =>
+                                $endsAt,
+
+                            'payment_used' =>
+                                0,
+
+                            'group_used' =>
+                                0,
+
+                            'override_payment_limit' =>
+                                $overridePaymentLimit,
+
+                            'override_group_limit' =>
+                                null,
+
+                            'renewal_reminded_at' =>
+                                null,
+                        ]);
+
+                    $action = 'created';
+                } else {
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Update existing subscription
+                    |--------------------------------------------------------------------------
+                    |
+                    | No new UserSubscription record is created.
+                    |
+                    | userSubscriptionsID stays exactly the same.
+                    |
+                    */
+                    $subscription->update([
                         'package_id' =>
                             $package->packagesID,
 
+                        /*
+                         * Keep only the latest purchase transaction here.
+                         *
+                         * Full purchase history remains available in the
+                         * package_transactions table.
+                         */
                         'transaction_id' =>
                             (string) $transaction->getKey(),
 
@@ -212,46 +291,65 @@ final class PaymentConfirmationService
                             $transaction->payment_method
                             ?: 'aba_payway',
 
-                        'status' => 'active',
+                        'status' =>
+                            'active',
 
-                        'starts_at' => $startsAt,
-                        'ends_at' => $endsAt,
+                        'starts_at' =>
+                            $startsAt,
 
-                        /*
-                         * The new subscription starts with no newly
-                         * consumed payments. Remaining old payments are
-                         * added to override_payment_limit instead.
-                         */
-                        'payment_used' => 0,
+                        'ends_at' =>
+                            $endsAt,
 
                         /*
-                         * Existing groups remain counted.
-                         */
-                        'group_used' => $groupsAlreadyUsed,
-
-                        /*
-                         * Null means use the package's original limit.
+                         * Old remaining quota has already been included
+                         * inside override_payment_limit.
                          *
-                         * An override is only required when old remaining
-                         * payment quota is carried forward.
+                         * Therefore usage starts again from zero.
                          */
+                        'payment_used' =>
+                            0,
+
+                        /*
+                         * Existing groups stay counted.
+                         */
+                        'group_used' =>
+                            $groupsAlreadyUsed,
+
                         'override_payment_limit' =>
                             $overridePaymentLimit,
 
                         /*
-                         * Use the new package's normal group limit.
+                         * Use the newly purchased package's group limit.
                          */
-                        'override_group_limit' => null,
+                        'override_group_limit' =>
+                            null,
 
-                        'renewal_reminded_at' => null,
+                        /*
+                         * Allow the new subscription period to receive
+                         * another renewal reminder.
+                         */
+                        'renewal_reminded_at' =>
+                            null,
                     ]);
+
+                    $action = 'updated';
+                }
 
                 /*
                 |--------------------------------------------------------------------------
-                | Link package transaction to subscription
+                | Link this purchase transaction to the subscription
                 |--------------------------------------------------------------------------
+                |
+                | Example:
+                |
+                | Transaction 1 ─┐
+                | Transaction 2 ─┼──> Same UserSubscription
+                | Transaction 3 ─┘
+                |
+                | This keeps every purchase in package_transactions while
+                | maintaining only one current subscription row per user.
+                |
                 */
-
                 $transaction->forceFill([
                     'subscription_id' =>
                         $subscription->userSubscriptionsID,
@@ -259,19 +357,24 @@ final class PaymentConfirmationService
 
                 /*
                 |--------------------------------------------------------------------------
-                | Deactivate previous subscription
+                | Reload subscription with the newly purchased package
                 |--------------------------------------------------------------------------
                 */
+                $subscription = $subscription
+                    ->refresh()
+                    ->load('package');
 
-                if ($currentSubscription) {
-                    $this->deactivatePreviousSubscription(
-                        $currentSubscription
-                    );
-                }
-
+                /*
+                |--------------------------------------------------------------------------
+                | Log activation
+                |--------------------------------------------------------------------------
+                */
                 Log::info(
                     'Package subscription activated',
                     [
+                        'action' =>
+                            $action,
+
                         'package_transaction_id' =>
                             $transaction->getKey(),
 
@@ -287,11 +390,17 @@ final class PaymentConfirmationService
                         'payment_carry_over' =>
                             $paymentCarryOver,
 
-                        'group_used_carry_over' =>
+                        'group_used' =>
                             $groupsAlreadyUsed,
 
                         'override_payment_limit' =>
                             $overridePaymentLimit,
+
+                        'starts_at' =>
+                            $startsAt,
+
+                        'ends_at' =>
+                            $endsAt,
                     ]
                 );
 
@@ -302,30 +411,28 @@ final class PaymentConfirmationService
 
         /*
         |--------------------------------------------------------------------------
-        | Cache invalidation — AFTER commit
+        | Clear caches after database commit
         |--------------------------------------------------------------------------
-        |
-        | Must run outside the transaction: invalidating inside would let
-        | a concurrent request re-cache the OLD subscription row before
-        | this transaction commits, leaving the bot showing stale limits
-        | (e.g. the old group_limit after upgrading to Enterprise = 4).
-        |
-        | Runs for the idempotent paths too — harmless, and it repairs a
-        | previous activation that crashed before invalidation.
         */
-
         $userUuid = (string) $subscription->user_id;
 
         if ($userUuid !== '') {
-            LimitHandler::invalidateForUser($userUuid);
-            PackageHandler::invalidateSubscription($userUuid);
+            LimitHandler::invalidateForUser(
+                $userUuid
+            );
+
+            PackageHandler::invalidateSubscription(
+                $userUuid
+            );
         }
 
         return $subscription;
     }
 
     /**
-     * Find a subscription already linked to this transaction.
+     * Find subscription already attached to this payment transaction.
+     *
+     * Used for duplicate callback protection.
      */
     private function findAttachedSubscription(
         PackageTransaction $transaction
@@ -339,6 +446,7 @@ final class PaymentConfirmationService
         }
 
         return UserSubscription::query()
+            ->with('package')
             ->where(
                 'userSubscriptionsID',
                 $subscriptionId
@@ -347,7 +455,26 @@ final class PaymentConfirmationService
     }
 
     /**
-     * Resolve the transaction owner.
+     * Find the user's single subscription row.
+     *
+     * We intentionally do not use scopeActive().
+     *
+     * An expired subscription row should also be reused when
+     * the same user purchases another package.
+     */
+    private function findSubscriptionForUser(
+        string $userUuid
+    ): ?UserSubscription {
+        return UserSubscription::query()
+            ->with('package')
+            ->forUser($userUuid)
+            ->latest('starts_at')
+            ->lockForUpdate()
+            ->first();
+    }
+
+    /**
+     * Resolve transaction owner.
      */
     private function resolveUser(
         PackageTransaction $transaction
@@ -366,17 +493,21 @@ final class PaymentConfirmationService
         }
 
         $user = User::query()
-            ->where('uuid', $userUuid)
+            ->where(
+                'uuid',
+                $userUuid
+            )
             ->first();
 
         if (! $user) {
             Log::error(
-                'PayWay activation: user not found',
+                'Package activation: user not found',
                 [
-                    'transaction' =>
+                    'package_transaction_id' =>
                         $transaction->getKey(),
 
-                    'user_id' => $userUuid,
+                    'user_id' =>
+                        $userUuid,
                 ]
             );
 
@@ -392,11 +523,7 @@ final class PaymentConfirmationService
     }
 
     /**
-     * Resolve the purchased package.
-     *
-     * Important:
-     * PackageTransaction uses package_id.
-     * Package uses packagesID.
+     * Resolve purchased package.
      */
     private function resolvePackage(
         PackageTransaction $transaction
@@ -406,17 +533,6 @@ final class PaymentConfirmationService
         );
 
         if ($packageId === '') {
-            Log::error(
-                'PayWay activation: package_id missing',
-                [
-                    'transaction' =>
-                        $transaction->getKey(),
-
-                    'package_id' =>
-                        $transaction->package_id,
-                ]
-            );
-
             throw new RuntimeException(
                 sprintf(
                     'Package ID is missing for transaction %s.',
@@ -426,17 +542,21 @@ final class PaymentConfirmationService
         }
 
         $package = Package::query()
-            ->where('packagesID', $packageId)
+            ->where(
+                'packagesID',
+                $packageId
+            )
             ->first();
 
         if (! $package) {
             Log::error(
-                'PayWay activation: package not found',
+                'Package activation: package not found',
                 [
-                    'transaction' =>
+                    'package_transaction_id' =>
                         $transaction->getKey(),
 
-                    'package_id' => $packageId,
+                    'package_id' =>
+                        $packageId,
                 ]
             );
 
@@ -453,32 +573,27 @@ final class PaymentConfirmationService
     }
 
     /**
-     * Find and lock the current active subscription.
-     */
-    private function findCurrentSubscription(
-        string $userUuid
-    ): ?UserSubscription {
-        return UserSubscription::query()
-            ->with('package')
-            ->forUser($userUuid)
-            ->active()
-            ->latest('starts_at')
-            ->lockForUpdate()
-            ->first();
-    }
-
-    /**
-     * Calculate the effective payment limit for the new subscription.
+     * Calculate new effective payment limit.
      *
-     * Null means unlimited.
+     * NULL means use the package's own payment limit,
+     * including unlimited packages.
      *
-     * When there is no carry-over, null is returned so the subscription
-     * uses the package's normal payment_limit.
+     * Example:
+     *
+     * Package limit = 500
+     * Carry-over    = 7,000
+     *
+     * Override      = 7,500
      */
     private function calculatePaymentLimit(
         Package $package,
         int $carryOver
     ): ?int {
+        /*
+        |--------------------------------------------------------------------------
+        | Unlimited package
+        |--------------------------------------------------------------------------
+        */
         if (
             method_exists(
                 $package,
@@ -493,11 +608,17 @@ final class PaymentConfirmationService
             return null;
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | No carry-over
+        |--------------------------------------------------------------------------
+        |
+        | No override is needed.
+        |
+        | effectivePaymentLimit() will read the limit directly from Package.
+        |
+        */
         if ($carryOver <= 0) {
-            /*
-             * No override is needed. effectivePaymentLimit() will use
-             * the package's payment_limit.
-             */
             return null;
         }
 
@@ -508,11 +629,15 @@ final class PaymentConfirmationService
     }
 
     /**
-     * Ensure the new package can support groups already connected.
+     * Warn when a user already uses more groups than the newly
+     * purchased package allows.
+     *
+     * We do not throw an exception because the payment is already complete.
      */
-    private function ensureGroupLimitSupportsExistingGroups(
+    private function warnIfGroupLimitExceeded(
         Package $package,
-        int $groupsAlreadyUsed
+        int $groupsAlreadyUsed,
+        string $userUuid
     ): void {
         if ($groupsAlreadyUsed <= 0) {
             return;
@@ -532,76 +657,91 @@ final class PaymentConfirmationService
             return;
         }
 
-        $newGroupLimit = (int) $package->group_limit;
+        $newGroupLimit = max(
+            0,
+            (int) $package->group_limit
+        );
 
-        if ($groupsAlreadyUsed > $newGroupLimit) {
-            throw new RuntimeException(
-                sprintf(
-                    'The selected package allows %d groups, but the user already uses %d groups.',
-                    $newGroupLimit,
-                    $groupsAlreadyUsed
-                )
-            );
+        if ($groupsAlreadyUsed <= $newGroupLimit) {
+            return;
         }
+
+        Log::warning(
+            'User subscription activated above new package group limit',
+            [
+                'user_id' =>
+                    $userUuid,
+
+                'package_id' =>
+                    $package->packagesID,
+
+                'package_group_limit' =>
+                    $newGroupLimit,
+
+                'groups_already_used' =>
+                    $groupsAlreadyUsed,
+            ]
+        );
     }
 
     /**
-     * Calculate the subscription expiration date.
+     * Calculate subscription expiration.
      *
-     * Null means lifetime.
+     * NULL means lifetime.
      */
     private function calculateEndDate(
         Carbon $startsAt,
         string $billingCycle
     ): ?Carbon {
         return match (
-            strtolower(trim($billingCycle))
+            strtolower(
+                trim($billingCycle)
+            )
         ) {
             'daily' =>
-                $startsAt->copy()->addDay(),
+                $startsAt
+                    ->copy()
+                    ->addDay(),
 
             'weekly' =>
-                $startsAt->copy()->addWeek(),
+                $startsAt
+                    ->copy()
+                    ->addWeek(),
 
             'monthly' =>
-                $startsAt->copy()->addMonthNoOverflow(),
+                $startsAt
+                    ->copy()
+                    ->addMonthNoOverflow(),
 
             'quarterly' =>
-                $startsAt->copy()->addMonthsNoOverflow(3),
+                $startsAt
+                    ->copy()
+                    ->addMonthsNoOverflow(3),
 
             'semiannual',
             'semi_annually',
             'half_year' =>
-                $startsAt->copy()->addMonthsNoOverflow(6),
+                $startsAt
+                    ->copy()
+                    ->addMonthsNoOverflow(6),
 
             'yearly',
             'annual' =>
-                $startsAt->copy()->addYearNoOverflow(),
+                $startsAt
+                    ->copy()
+                    ->addYearNoOverflow(),
 
-            'lifetime' => null,
+            'lifetime' =>
+                null,
 
-            default => throw new RuntimeException(
-                sprintf(
-                    'Unsupported package billing cycle: %s',
-                    $billingCycle
-                )
-            ),
+            default =>
+                throw new RuntimeException(
+                    sprintf(
+                        'Unsupported package billing cycle: %s',
+                        $billingCycle
+                    )
+                ),
         };
     }
-
-    /**
-     * Deactivate the previous active subscription after its remaining
-     * payment quota and existing group usage have been transferred.
-     */
-    private function deactivatePreviousSubscription(
-        UserSubscription $subscription
-    ): void {
-        UserSubscription::query()
-            ->whereKey($subscription->getKey())
-            ->where('status', 'active')
-            ->update([
-                'status' => 'expired',
-                'ends_at' => now(),
-            ]);
-    }
 }
+
